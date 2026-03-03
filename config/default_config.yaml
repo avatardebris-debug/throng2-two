@@ -1,0 +1,49 @@
+# Thronglet Brain Configuration
+
+network:
+  n_neurons: 500
+  connection_probability: 0.02  # 2% connectivity (sparse like brain)
+  use_fibonacci_placement: true
+  dimension: 2  # 2D or 3D space
+  
+neuron:
+  threshold_min: 0.3
+  threshold_max: 0.7
+  leak_rate: 0.9  # How fast activation decays
+  homeostatic_rate: 0.01  # Threshold adjustment rate
+  
+learning:
+  hebbian_rate: 0.01
+  td_learning_rate: 0.1
+  gamma: 0.95  # Discount factor for future rewards
+  eligibility_decay: 0.9
+  
+neuromodulators:
+  dopamine_baseline: 0.5
+  serotonin_baseline: 0.5
+  norepinephrine_baseline: 0.5
+  acetylcholine_baseline: 0.5
+  
+pruning:
+  enabled: true
+  interval: 1000  # Prune every N steps
+  correlation_threshold: 0.9  # Prune if correlation > this
+  min_weight: 0.05  # Prune connections weaker than this
+  
+environment:
+  grid_size: 10
+  max_steps: 100
+  use_curriculum: true
+  initial_difficulty: 2  # Distance to goal at start
+  
+training:
+  n_episodes: 200
+  exploration_rate: 0.3
+  exploration_decay: 0.995
+  success_threshold: 0.7  # Win rate to increase difficulty
+  
+visualization:
+  show_network: true
+  show_trajectory: true
+  update_interval: 10  # Update plots every N episodes
+  max_connections_shown: 100  # Limit for clarity

@@ -1,0 +1,32 @@
+# Large files
+*.npy
+*.npz
+*.pkl
+*.pt
+*.pth
+*.h5
+*.hdf5
+*.png
+
+# Throng5 archive (reference only, not needed for execution)
+throng5 - Copy/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Gemini
+.gemini/
