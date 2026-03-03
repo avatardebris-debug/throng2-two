@@ -230,6 +230,8 @@ def main():
 
     all_results = {}
 
+    out_path = os.path.join(os.path.dirname(__file__), "gauntlet_results.json")
+
     for i, cfg in enumerate(ENVS):
         env_name = cfg["name"]
         n_eps = cfg["episodes"]
@@ -242,65 +244,88 @@ def main():
         print(f"  Episodes: {n_eps}, Solve threshold: {threshold}")
         print(f"{'='*70}")
 
-        # 1. Random baseline
-        print("  Running Random baseline...")
-        t0 = time.time()
-        rand_rewards = run_random(env_name, min(n_eps, 500), env_kwargs)
-        rand_time = time.time() - t0
-        rand_avg = float(np.mean(rand_rewards[-100:]))
-        print(f"    Random avg100: {rand_avg:.1f} ({rand_time:.1f}s)")
+        try:
+            # Quick test that env can be created
+            test_env = gym.make(env_name, **env_kwargs)
+            test_env.close()
+        except Exception as e:
+            print(f"  SKIPPED: {e}")
+            all_results[env_name] = {"skipped": True, "reason": str(e)}
+            # Save partial results after each env
+            with open(out_path, "w") as f:
+                json.dump(all_results, f, indent=2, default=str)
+            continue
 
-        # 2. Bare PPO
-        print("  Running Bare PPO...")
-        t0 = time.time()
-        ppo_rewards = run_bare_ppo(env_name, n_eps, obs_type, env_kwargs)
-        ppo_time = time.time() - t0
-        ppo_avg = float(np.mean(ppo_rewards[-100:]))
-        ppo_solved = None
-        for ep in range(100, len(ppo_rewards)):
-            if np.mean(ppo_rewards[ep-100:ep]) >= threshold:
-                ppo_solved = ep
-                break
-        print(f"    PPO avg100: {ppo_avg:.1f} ({ppo_time:.1f}s) "
-              f"solved={'ep '+str(ppo_solved) if ppo_solved else 'no'}")
+        try:
+            # 1. Random baseline
+            print("  Running Random baseline...")
+            t0 = time.time()
+            rand_rewards = run_random(env_name, min(n_eps, 500), env_kwargs)
+            rand_time = time.time() - t0
+            rand_avg = float(np.mean(rand_rewards[-100:]))
+            print(f"    Random avg100: {rand_avg:.1f} ({rand_time:.1f}s)")
 
-        # 3. ThrongletCell (with dreamer)
-        print("  Running ThrongletCell (dreamer)...")
-        t0 = time.time()
-        cell_rewards, cell = run_cell(env_name, n_eps, obs_type, True, env_kwargs)
-        cell_time = time.time() - t0
-        cell_avg = float(np.mean(cell_rewards[-100:]))
-        cell_solved = None
-        for ep in range(100, len(cell_rewards)):
-            if np.mean(cell_rewards[ep-100:ep]) >= threshold:
-                cell_solved = ep
-                break
-        print(f"    Cell avg100: {cell_avg:.1f} ({cell_time:.1f}s) "
-              f"solved={'ep '+str(cell_solved) if cell_solved else 'no'} "
-              f"neurons={cell.neuron_count}")
+            # 2. Bare PPO
+            print("  Running Bare PPO...")
+            t0 = time.time()
+            ppo_rewards = run_bare_ppo(env_name, n_eps, obs_type, env_kwargs)
+            ppo_time = time.time() - t0
+            ppo_avg = float(np.mean(ppo_rewards[-100:]))
+            ppo_solved = None
+            for ep in range(100, len(ppo_rewards)):
+                if np.mean(ppo_rewards[ep-100:ep]) >= threshold:
+                    ppo_solved = ep
+                    break
+            print(f"    PPO avg100: {ppo_avg:.1f} ({ppo_time:.1f}s) "
+                  f"solved={'ep '+str(ppo_solved) if ppo_solved else 'no'}")
 
-        # Store results
-        all_results[env_name] = {
-            "threshold": threshold,
-            "random": {"avg100": round(rand_avg, 2)},
-            "bare_ppo": {
-                "avg100": round(ppo_avg, 2),
-                "solved_at": ppo_solved,
-                "time_s": round(ppo_time, 1),
-            },
-            "cell": {
-                "avg100": round(cell_avg, 2),
-                "solved_at": cell_solved,
-                "time_s": round(cell_time, 1),
-                "final_neurons": cell.neuron_count,
-                "growth_events": cell.growth_controller.stats()["grow_events"]
-                if cell.growth_controller else 0,
-                "prune_events": cell.growth_controller.stats()["prune_events"]
-                if cell.growth_controller else 0,
-                "wm_confidence": cell.world_model.confidence
-                if cell.world_model else 0,
-            },
-        }
+            # 3. ThrongletCell (with dreamer)
+            print("  Running ThrongletCell (dreamer)...")
+            t0 = time.time()
+            cell_rewards, cell = run_cell(env_name, n_eps, obs_type, True, env_kwargs)
+            cell_time = time.time() - t0
+            cell_avg = float(np.mean(cell_rewards[-100:]))
+            cell_solved = None
+            for ep in range(100, len(cell_rewards)):
+                if np.mean(cell_rewards[ep-100:ep]) >= threshold:
+                    cell_solved = ep
+                    break
+            print(f"    Cell avg100: {cell_avg:.1f} ({cell_time:.1f}s) "
+                  f"solved={'ep '+str(cell_solved) if cell_solved else 'no'} "
+                  f"neurons={cell.neuron_count}")
+
+            # Store results
+            all_results[env_name] = {
+                "threshold": threshold,
+                "random": {"avg100": round(rand_avg, 2)},
+                "bare_ppo": {
+                    "avg100": round(ppo_avg, 2),
+                    "solved_at": ppo_solved,
+                    "time_s": round(ppo_time, 1),
+                },
+                "cell": {
+                    "avg100": round(cell_avg, 2),
+                    "solved_at": cell_solved,
+                    "time_s": round(cell_time, 1),
+                    "final_neurons": cell.neuron_count,
+                    "growth_events": cell.growth_controller.stats()["grow_events"]
+                    if cell.growth_controller else 0,
+                    "prune_events": cell.growth_controller.stats()["prune_events"]
+                    if cell.growth_controller else 0,
+                    "wm_confidence": cell.world_model.confidence
+                    if cell.world_model else 0,
+                },
+            }
+        except Exception as e:
+            print(f"  ERROR during {env_name}: {e}")
+            import traceback
+            traceback.print_exc()
+            all_results[env_name] = {"error": True, "reason": str(e)}
+
+        # Save partial results after each env
+        with open(out_path, "w") as f:
+            json.dump(all_results, f, indent=2, default=str)
+        print(f"  (partial results saved)")
 
     # ── Summary Table ────────────────────────────────────────────
     print(f"\n\n{'='*70}")
@@ -312,7 +337,13 @@ def main():
 
     ppo_wins = 0
     cell_wins = 0
+    completed = 0
     for name, r in all_results.items():
+        if r.get("skipped") or r.get("error"):
+            reason = r.get("reason", "unknown")[:40]
+            print(f"{name:<20} {'SKIPPED':>8} {reason}")
+            continue
+        completed += 1
         ppo_solved = "✓" if r["bare_ppo"]["solved_at"] else "✗"
         cell_solved = "✓" if r["cell"]["solved_at"] else "✗"
         if r["bare_ppo"]["avg100"] > r["random"]["avg100"] + 5:
@@ -325,11 +356,11 @@ def main():
               f"{ppo_solved:>6} {cell_solved:>6} "
               f"{r['cell']['final_neurons']:>8}")
 
-    print(f"\nPPO beats random in {ppo_wins}/{len(ENVS)} envs")
-    print(f"Cell beats random in {cell_wins}/{len(ENVS)} envs")
+    print(f"\nCompleted: {completed}/{len(ENVS)} environments")
+    print(f"PPO beats random in {ppo_wins}/{completed} envs")
+    print(f"Cell beats random in {cell_wins}/{completed} envs")
 
-    # Save results
-    out_path = os.path.join(os.path.dirname(__file__), "gauntlet_results.json")
+    # Final save
     with open(out_path, "w") as f:
         json.dump(all_results, f, indent=2, default=str)
     print(f"\nResults saved to: {out_path}")
