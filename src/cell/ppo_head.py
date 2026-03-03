@@ -113,8 +113,11 @@ class PPOHead:
         self.batch_size = batch_size
         self.rollout_length = rollout_length
 
+        # Device (auto-detect GPU)
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
         # Networks
-        self.network = ActorCritic(input_dim, n_actions, hidden)
+        self.network = ActorCritic(input_dim, n_actions, hidden).to(self.device)
         self.optimizer = torch.optim.Adam(self.network.parameters(), lr=lr)
 
         # Rollout buffer
@@ -135,7 +138,7 @@ class PPOHead:
         Returns: (action, log_prob, value)
         """
         with torch.no_grad():
-            x = torch.as_tensor(features, dtype=torch.float32).unsqueeze(0)
+            x = torch.as_tensor(features, dtype=torch.float32).unsqueeze(0).to(self.device)
             action, log_prob, _, value = self.network.get_action_and_value(x)
         return int(action.item()), float(log_prob.item()), float(value.item())
 
@@ -163,9 +166,9 @@ class PPOHead:
             return {}
 
         # Convert buffer to tensors
-        obs = torch.tensor(np.array(self.buffer.obs), dtype=torch.float32)
-        actions = torch.tensor(self.buffer.actions, dtype=torch.long)
-        old_log_probs = torch.tensor(self.buffer.log_probs, dtype=torch.float32)
+        obs = torch.tensor(np.array(self.buffer.obs), dtype=torch.float32).to(self.device)
+        actions = torch.tensor(self.buffer.actions, dtype=torch.long).to(self.device)
+        old_log_probs = torch.tensor(self.buffer.log_probs, dtype=torch.float32).to(self.device)
         rewards = np.array(self.buffer.rewards, dtype=np.float32)
         dones = np.array(self.buffer.dones, dtype=np.float32)
         values = np.array(self.buffer.values, dtype=np.float32)
@@ -174,8 +177,8 @@ class PPOHead:
         advantages, returns = self._compute_gae(
             rewards, values, dones, last_value
         )
-        advantages = torch.tensor(advantages, dtype=torch.float32)
-        returns = torch.tensor(returns, dtype=torch.float32)
+        advantages = torch.tensor(advantages, dtype=torch.float32).to(self.device)
+        returns = torch.tensor(returns, dtype=torch.float32).to(self.device)
 
         # Normalize advantages
         if len(advantages) > 1:
@@ -278,7 +281,7 @@ class PPOHead:
     def get_value(self, features: np.ndarray) -> float:
         """Get value estimate for a state."""
         with torch.no_grad():
-            x = torch.as_tensor(features, dtype=torch.float32).unsqueeze(0)
+            x = torch.as_tensor(features, dtype=torch.float32).unsqueeze(0).to(self.device)
             _, value = self.network(x)
         return float(value.item())
 

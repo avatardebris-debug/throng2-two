@@ -114,6 +114,7 @@ class ThrongletCell:
         )
 
         # The encoder is part of PPO's optimization graph
+        self.encoder.to(self.ppo.device)
         self.ppo.optimizer.add_param_group(
             {"params": self.encoder.parameters(), "lr": ppo_lr}
         )

@@ -43,11 +43,12 @@ class StateEncoder(nn.Module):
 
     def encode(self, obs: np.ndarray) -> np.ndarray:
         """Encode a single observation (numpy in, numpy out, no grad)."""
+        device = next(self.parameters()).device
         with torch.no_grad():
-            x = torch.as_tensor(obs, dtype=torch.float32)
+            x = torch.as_tensor(obs, dtype=torch.float32).to(device)
             if x.dim() == 1:
                 x = x.unsqueeze(0)
-            features = self.net(x).squeeze(0).numpy()
+            features = self.net(x).squeeze(0).cpu().numpy()
 
         # Track stats
         self._encode_count += 1

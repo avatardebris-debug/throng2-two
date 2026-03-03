@@ -61,6 +61,9 @@ class CellWorldModel:
         # Architecture: (features + action_onehot) → hidden → (delta, reward)
         input_dim = feature_dim + n_actions
 
+        # Device (auto-detect GPU)
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
         self._encoder = nn.Sequential(
             nn.Linear(input_dim, hidden_size),
             nn.LayerNorm(hidden_size),
@@ -68,21 +71,21 @@ class CellWorldModel:
             nn.Linear(hidden_size, hidden_size),
             nn.LayerNorm(hidden_size),
             nn.ReLU(),
-        )
+        ).to(self.device)
 
         # State delta head
         self._state_head = nn.Sequential(
             nn.Linear(hidden_size, hidden_size // 2),
             nn.ReLU(),
             nn.Linear(hidden_size // 2, feature_dim),
-        )
+        ).to(self.device)
 
         # Reward head
         self._reward_head = nn.Sequential(
             nn.Linear(hidden_size, hidden_size // 4),
             nn.ReLU(),
             nn.Linear(hidden_size // 4, 1),
-        )
+        ).to(self.device)
 
         # Optimizer
         all_params = (
@@ -130,13 +133,13 @@ class CellWorldModel:
         indices = np.random.choice(len(self._replay), self.batch_size, replace=False)
         batch = [self._replay[i] for i in indices]
 
-        states = torch.FloatTensor(np.array([b[0] for b in batch]))
+        states = torch.FloatTensor(np.array([b[0] for b in batch])).to(self.device)
         actions_idx = [b[1] for b in batch]
-        next_states = torch.FloatTensor(np.array([b[2] for b in batch]))
-        rewards = torch.FloatTensor([b[3] for b in batch]).unsqueeze(1)
+        next_states = torch.FloatTensor(np.array([b[2] for b in batch])).to(self.device)
+        rewards = torch.FloatTensor([b[3] for b in batch]).unsqueeze(1).to(self.device)
 
         # One-hot encode actions
-        actions_oh = torch.zeros(self.batch_size, self.n_actions)
+        actions_oh = torch.zeros(self.batch_size, self.n_actions).to(self.device)
         for i, a in enumerate(actions_idx):
             actions_oh[i, a] = 1.0
 
@@ -186,8 +189,8 @@ class CellWorldModel:
         Returns: (predicted_next_features, predicted_reward)
         """
         with torch.inference_mode():
-            state_t = torch.as_tensor(features, dtype=torch.float32).unsqueeze(0)
-            action_oh = torch.zeros(1, self.n_actions)
+            state_t = torch.as_tensor(features, dtype=torch.float32).unsqueeze(0).to(self.device)
+            action_oh = torch.zeros(1, self.n_actions).to(self.device)
             action_oh[0, action] = 1.0
 
             x = torch.cat([state_t, action_oh], dim=1)
@@ -195,7 +198,7 @@ class CellWorldModel:
             delta = self._state_head(encoded)
             reward = self._reward_head(encoded)
 
-            next_features = (state_t + delta).squeeze(0).numpy()
+            next_features = (state_t + delta).squeeze(0).cpu().numpy()
             pred_reward = reward.item()
 
         return next_features, pred_reward
