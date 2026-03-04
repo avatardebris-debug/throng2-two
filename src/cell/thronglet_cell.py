@@ -29,6 +29,7 @@ from .ppo_head import PPOHead
 from .world_model import CellWorldModel
 from .dreamer import CellDreamer
 from .growth_controller import GrowthController
+from .snn_features_v2 import ResonantSNN
 
 
 class ThrongletCell:
@@ -61,6 +62,7 @@ class ThrongletCell:
         dream_depth: int = 3,
         use_growth: bool = True,
         max_neurons: int = 512,
+        use_v2_snn: bool = False,
     ):
         """
         Args:
@@ -77,6 +79,7 @@ class ThrongletCell:
             dream_depth: Steps to dream ahead.
             use_growth: If False, skip growth/pruning controller.
             max_neurons: Maximum SNN neurons (computational budget).
+            use_v2_snn: If True, use ResonantSNN v2 (freq bands, dense, prediction error).
         """
         self.obs_dim = obs_dim
         self.n_actions = n_actions
@@ -93,10 +96,16 @@ class ThrongletCell:
 
         # 2. SNN: compressed → SNN features
         if use_snn:
-            self.snn = SNNFeatureExtractor(
-                n_neurons=snn_neurons,
-                input_dim=compressed_dim,
-            )
+            if use_v2_snn:
+                self.snn = ResonantSNN(
+                    n_neurons=snn_neurons,
+                    input_dim=compressed_dim,
+                )
+            else:
+                self.snn = SNNFeatureExtractor(
+                    n_neurons=snn_neurons,
+                    input_dim=compressed_dim,
+                )
             # PPO input = raw_obs + encoder_features + snn_features
             feature_dim = obs_dim + compressed_dim + self.snn.feature_dim
         else:
