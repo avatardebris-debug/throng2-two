@@ -57,12 +57,15 @@ class ResonantSNN:
         learning_rate: float = 0.01,
         leak: float = 0.85,
         threshold: float = 0.3,
+        learn_mode: str = "continuous",  # 'continuous', 'episodic', 'frozen'
     ):
+        assert learn_mode in ("continuous", "episodic", "frozen")
         self.n_neurons = n_neurons
         self.input_dim = input_dim
         self.learning_rate = learning_rate
         self.leak = leak
         self.threshold = threshold
+        self.learn_mode = learn_mode
         self._step_count = 0
 
         # Partition neurons into bands
@@ -103,6 +106,9 @@ class ResonantSNN:
         # Full activity vector (concatenation of all bands)
         self.activity = np.zeros(n_neurons)
 
+        # Episodic learning: accumulate errors, apply at reset
+        self._episode_errors = {name: [] for name in self.bands}
+
         # Stats
         self._total_pred_error = 0.0
         self._total_spikes = 0
@@ -142,13 +148,17 @@ class ResonantSNN:
                     error = band["activity"] - band["prediction"]
                     band["pred_error"] = float(np.mean(np.abs(error)))
 
-                    # Self-supervised learning: adjust W_pred to reduce error
-                    # dW = lr * error_outer(activity, activity)
-                    dW = self.learning_rate * np.outer(error, band["activity"])
-                    band["W_pred"] += dW
-                    # Clip to prevent explosion
-                    np.clip(band["W_pred"], -1.0, 1.0, out=band["W_pred"])
-                    self._n_pred_updates += 1
+                    if self.learn_mode == "continuous":
+                        # Learn every step
+                        dW = self.learning_rate * np.outer(error, band["activity"])
+                        band["W_pred"] += dW
+                        np.clip(band["W_pred"], -1.0, 1.0, out=band["W_pred"])
+                        self._n_pred_updates += 1
+                    elif self.learn_mode == "episodic":
+                        # Accumulate error for batch update at reset
+                        self._episode_errors[name].append(
+                            (error.copy(), band["activity"].copy())
+                        )
 
                 # Total input to this band
                 total = (
@@ -193,11 +203,26 @@ class ResonantSNN:
         return np.array(features, dtype=np.float32)
 
     def reset(self):
-        """Reset activity between episodes (keep learned weights)."""
+        """Reset activity between episodes. If episodic, apply accumulated learning."""
+        # Episodic batch learning: apply accumulated errors
+        if self.learn_mode == "episodic":
+            for name, band in self.bands.items():
+                errors = self._episode_errors[name]
+                if errors:
+                    # Average the outer products across the episode
+                    dW = np.zeros_like(band["W_pred"])
+                    for err, act in errors:
+                        dW += np.outer(err, act)
+                    dW *= self.learning_rate / len(errors)
+                    band["W_pred"] += dW
+                    np.clip(band["W_pred"], -1.0, 1.0, out=band["W_pred"])
+                    self._n_pred_updates += 1
+            self._episode_errors = {name: [] for name in self.bands}
+
+        # Reset activity
         for band in self.bands.values():
             band["activity"] = np.zeros(band["size"])
             band["prediction"] = np.zeros(band["size"])
-            # Keep pred_error for continuity
         self.activity = np.zeros(self.n_neurons)
 
     def stats(self) -> dict:
