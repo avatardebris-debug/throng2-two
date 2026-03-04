@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 import gymnasium as gym
 from src.cell.thronglet_cell import ThrongletCell
 
-N_EPISODES = 200
+N_EPISODES = 300
 REPORT_EVERY = 50
 
 
@@ -33,10 +33,10 @@ def run_cell(label, use_v2_snn, n_episodes=N_EPISODES):
         snn_neurons=64,
         compressed_dim=16,
         ppo_lr=3e-4,
-        ppo_rollout_length=2048,
+        ppo_rollout_length=256,   # short: PPO updates every ~10 eps
         use_snn=True,
-        use_dreamer=False,   # off — isolates SNN signal
-        use_growth=False,    # off — isolates SNN signal
+        use_dreamer=False,        # off — isolates SNN signal
+        use_growth=False,         # off — isolates SNN signal
         use_v2_snn=use_v2_snn,
     )
 
@@ -92,9 +92,9 @@ def run_cell(label, use_v2_snn, n_episodes=N_EPISODES):
 
 def main():
     print("=" * 60)
-    print("SNN A/B TEST — CartPole-v1 (200 episodes)")
+    print("SNN A/B TEST — CartPole-v1 (300 episodes)")
     print("=" * 60)
-    print("  dreamer=OFF, growth=OFF  (isolating SNN signal)")
+    print("  dreamer=OFF, growth=OFF, rollout=256 (PPO updates every ~10 eps)")
     print()
 
     # --- v1: frozen SNN (current) ---
@@ -138,12 +138,13 @@ def main():
     # Quick learning curve (every 25 eps)
     print()
     print("Learning curve (avg per 25-ep window):")
-    print(f"  {'Episode':>8}  {'v1':>8}  {'v2':>8}")
+    print(f"  {'Episode':>8}  {'v1':>8}  {'v2':>8}  {'winner':>8}")
     for i in range(0, N_EPISODES, 25):
         end = min(i + 25, N_EPISODES)
         a1 = np.mean(r1["rewards"][i:end])
         a2 = np.mean(r2["rewards"][i:end])
-        print(f"  {end:>8d}  {a1:>8.1f}  {a2:>8.1f}")
+        winner = "v2" if a2 > a1 + 1 else ("v1" if a1 > a2 + 1 else "tie")
+        print(f"  {end:>8d}  {a1:>8.1f}  {a2:>8.1f}  {winner:>8}")
 
 
 if __name__ == "__main__":
