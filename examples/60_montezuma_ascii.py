@@ -8,10 +8,8 @@ Three agents compared:
   q_ascii     — Q-learner on ASCII region features (compact state)
   ppo_ascii   — PPO on full ASCII flat vector (300-dim)
 
-Install deps on cloud:
-  pip install gymnasium[atari] ale-py
-  pip install autorom[accept-rom-license]
-  AutoROM --accept-license
+Note: ROMs are bundled with ale-py. If env not found, run:
+  python -c "import gymnasium, ale_py; gymnasium.register_envs(ale_py)"
 
 Run:
   python examples/60_montezuma_ascii.py
@@ -113,12 +111,18 @@ class MinimalPPO:
 
 def make_montezuma(render: bool = False):
     import gymnasium as gym
+    import ale_py
+    gym.register_envs(ale_py)  # ensure ALE envs are registered
     mode = "human" if render else "rgb_array"
     try:
-        env = gym.make("ALE/MontezumaRevenge-v5", render_mode=mode,
-                       frameskip=4, repeat_action_probability=0.0)
+        env = gym.make(
+            "ALE/MontezumaRevenge-v5",
+            render_mode=mode,
+            frameskip=4,
+            repeat_action_probability=0.0,
+            full_action_space=False,  # only 18 game-relevant actions
+        )
     except Exception:
-        # Try alternate name
         env = gym.make("MontezumaRevenge-v4", render_mode=mode)
     return env
 
@@ -155,7 +159,7 @@ def run_agent(agent_name: str, n_episodes: int, enc: AsciiEncoder,
         obs, _ = env.reset()
         enc.reset()
         gs.reset()
-        total, done = 0.0, False
+        total, done, step_count = 0.0, False, 0
         prev_feat = None
 
         while not done:
@@ -176,6 +180,25 @@ def run_agent(agent_name: str, n_episodes: int, enc: AsciiEncoder,
             obs, reward, terminated, truncated, _ = env.step(action)
             done = terminated or truncated
             total += reward
+            step_count += 1
+
+            # Log any reward event with RAM coords + ASCII snapshot
+            if reward > 0:
+                frame_num = env.unwrapped.ale.getEpisodeFrameNumber()
+                try:
+                    ram = env.unwrapped.ale.getRAM()
+                    # RAM bytes vary by ROM; common Montezuma player coords
+                    px, py = int(ram[42]), int(ram[43])
+                    lives = int(ram[58])
+                    coord_str = f" player_ram=({px},{py}) lives={lives}"
+                except Exception:
+                    coord_str = ""
+                print(f"    [REWARD] ep={ep+1} frame={frame_num} step={step_count}"
+                      f" reward={reward:.0f} total={total:.0f}{coord_str}")
+                # Print ASCII grid at reward moment
+                reward_grid = enc.encode(obs)
+                print(enc.to_text(reward_grid))
+                print()
 
             # Learn
             if agent_name == "q_ascii" and prev_feat is not None:
@@ -203,7 +226,7 @@ def run_agent(agent_name: str, n_episodes: int, enc: AsciiEncoder,
         if (ep + 1) % 100 == 0 or ep == 0:
             avg = np.mean(rewards[-min(100, len(rewards)):])
             eps_val = getattr(agent, 'epsilon', None)
-            eps_str = f"  ε={eps_val:.3f}" if eps_val is not None else ""
+            eps_str = f"  eps={eps_val:.3f}" if eps_val is not None else ""
             q_str = f"  Q-states={q_sizes[-1]}" if q_sizes else ""
             print(f"  [{agent_name:10s}] ep {ep+1:5d}  "
                   f"avg100={avg:6.1f}  found_reward={found_reward}{eps_str}{q_str}")
