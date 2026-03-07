@@ -24,9 +24,11 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import time
+from datetime import datetime
 
 import numpy as np
 
@@ -82,7 +84,9 @@ def load_agent(agent: MarioICMAgent, path: str):
 
 def train_ascii(agent: MarioICMAgent, episodes: int = 500,
                 max_steps: int = 400, log_interval: int = 20,
-                save_path: str = "mario_agent.npz"):
+                save_path: str = "mario_agent.npz",
+                checkpoint_interval: int = 100,
+                report_path: str = "training_report.json"):
     """
     Fast training on ASCII simulator with ICM curiosity.
     ~14,000 steps/sec on CPU, much faster on GPU.
@@ -102,6 +106,8 @@ def train_ascii(agent: MarioICMAgent, episodes: int = 500,
 
     rewards = []
     wins = []
+    tier_history = []
+    checkpoints = []
     t0 = time.perf_counter()
     total_steps = 0
 
@@ -127,6 +133,7 @@ def train_ascii(agent: MarioICMAgent, episodes: int = 500,
         progress = level.max_x_reached / max(1, level.width)
         rewards.append(ep_reward)
         wins.append(int(won))
+        tier_history.append(curriculum.tier)
 
         curriculum.record_result(won=won, progress=progress,
                                  steps=step+1, level=level)
@@ -135,6 +142,12 @@ def train_ascii(agent: MarioICMAgent, episodes: int = 500,
             old = curriculum.tier
             new = curriculum.advance()
             print(f"  >>> ADVANCED tier {old} -> {new}")
+
+        # Periodic checkpoint
+        if checkpoint_interval and (ep + 1) % checkpoint_interval == 0:
+            ckpt_name = f"mario_agent_ep{ep+1}.npz"
+            save_agent(agent, ckpt_name)
+            checkpoints.append(ckpt_name)
 
         if ep % log_interval == 0 or ep == episodes - 1:
             recent_r = rewards[-log_interval:]
@@ -148,13 +161,48 @@ def train_ascii(agent: MarioICMAgent, episodes: int = 500,
                   f"| {elapsed:.0f}s")
 
     elapsed = time.perf_counter() - t0
+    final_win = float(np.mean(wins[-20:]))
+    final_reward = float(np.mean(rewards[-20:]))
+    max_tier = max(tier_history) if tier_history else 1
+    sps = total_steps / max(0.01, elapsed)
+
     print()
     print(f"  ASCII training: {episodes} ep, {total_steps} steps in {elapsed:.1f}s")
-    print(f"  Final win rate (last 20): {np.mean(wins[-20:]):.0%}")
-    print(f"  Final avg reward (last 20): {np.mean(rewards[-20:]):+.2f}")
-    print(f"  Max tier: {max(curriculum.tier for _ in [1])}")
+    print(f"  Final win rate (last 20): {final_win:.0%}")
+    print(f"  Final avg reward (last 20): {final_reward:+.2f}")
+    print(f"  Max tier: {max_tier}")
 
+    # Save final weights
     save_agent(agent, save_path)
+    checkpoints.append(save_path)
+
+    # Export training report
+    report = {
+        "timestamp": datetime.now().isoformat(),
+        "episodes": episodes,
+        "total_steps": total_steps,
+        "training_time_sec": round(elapsed, 1),
+        "steps_per_sec": round(sps, 0),
+        "final_win_rate": round(final_win, 3),
+        "final_avg_reward": round(final_reward, 2),
+        "max_tier_reached": max_tier,
+        "rewards": [round(r, 2) for r in rewards],
+        "wins": wins,
+        "tier_history": tier_history,
+        "checkpoints": checkpoints,
+        "hyperparams": {
+            "lr": agent._lr,
+            "gamma": agent.gamma,
+            "rollout_length": agent.rollout_length,
+            "icm_lambda": agent.intrinsic_lambda,
+            "icm_feature_dim": agent.icm.feature_dim,
+            "icm_lr": agent.icm.lr,
+        },
+    }
+    with open(report_path, "w") as f:
+        json.dump(report, f, indent=2)
+    print(f"  Report saved to {report_path}")
+
     return rewards, wins
 
 
@@ -245,6 +293,10 @@ def main():
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--icm-lambda", type=float, default=0.3,
                         help="Intrinsic reward scaling")
+    parser.add_argument("--checkpoint-interval", type=int, default=100,
+                        help="Save checkpoint every N episodes (0=disabled)")
+    parser.add_argument("--report", type=str, default="training_report.json",
+                        help="Path for JSON training report")
     args = parser.parse_args()
 
     print("=" * 60)
@@ -275,9 +327,13 @@ def main():
 
     # Phase 1: ASCII training
     if not args.real_only:
-        train_ascii(agent, episodes=args.episodes,
-                    max_steps=args.max_steps,
-                    save_path=args.save)
+        rewards, wins = train_ascii(
+            agent, episodes=args.episodes,
+            max_steps=args.max_steps,
+            save_path=args.save,
+            checkpoint_interval=args.checkpoint_interval,
+            report_path=args.report,
+        )
 
     # Phase 2: Real game validation
     if not args.ascii_only:
@@ -288,8 +344,12 @@ def main():
             print(f"\n  ⚠ Real game skipped: {e}")
             print("  Install: pip install gym-super-mario-bros nes-py")
 
+    # Suggest git push
     print()
-    print("  Done!")
+    print("  Done! To push results back to GitHub:")
+    print("    git add mario_agent*.npz training_report.json")
+    print("    git commit -m 'Training results: %(ep)s episodes'" % {"ep": args.episodes})
+    print("    git push origin main")
     print("=" * 60)
 
 
