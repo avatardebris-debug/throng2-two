@@ -39,6 +39,7 @@ from src.games.mario.mario_curriculum import MarioCurriculum
 from src.games.mario.mario_icm_agent import MarioICMAgent
 from src.games.mario.mario_ghost import GhostRacer
 from src.games.mario.mario_selfplay import DualRacer
+from src.games.mario.mario_paired import PAIREDTrainer
 
 # Auto-detect PyTorch for GPU acceleration
 try:
@@ -423,6 +424,10 @@ def main():
                         help="Enable ghost racing self-play")
     parser.add_argument("--selfplay", action="store_true",
                         help="Enable dual-rollout self-play racing")
+    parser.add_argument("--paired", action="store_true",
+                        help="PAIRED adversarial level design (GAN + agent co-training)")
+    parser.add_argument("--paired-steps", type=int, default=500,
+                        help="Number of PAIRED steps (each generates batch of levels)")
     args = parser.parse_args()
 
     print("=" * 60)
@@ -470,17 +475,37 @@ def main():
     if args.load:
         load_agent(agent, args.load)
 
-    # Phase 1: ASCII training
+    # Phase 1: Training
     if not args.real_only:
-        rewards, wins = train_ascii(
-            agent, episodes=args.episodes,
-            max_steps=args.max_steps,
-            save_path=args.save,
-            checkpoint_interval=args.checkpoint_interval,
-            report_path=args.report,
-            use_ghost=args.ghost,
-            use_selfplay=args.selfplay,
-        )
+        if args.paired:
+            # PAIRED: adversarial level design
+            print("  Mode: PAIRED adversarial level design")
+            print()
+            paired = PAIREDTrainer(
+                agent=agent,
+                batch_size=8,
+                max_steps=args.max_steps,
+            )
+            paired_stats = paired.train(
+                n_steps=args.paired_steps,
+                log_interval=10,
+                checkpoint_fn=lambda step, a, g: save_agent(a, f"mario_paired_step{step}.pt"),
+            )
+            save_agent(agent, args.save)
+            print(f"  PAIRED report: {paired.report()}")
+            rewards = [s['avg_reward'] for s in paired_stats]
+            wins = [s['wins'] for s in paired_stats]
+        else:
+            # Normal curriculum training
+            rewards, wins = train_ascii(
+                agent, episodes=args.episodes,
+                max_steps=args.max_steps,
+                save_path=args.save,
+                checkpoint_interval=args.checkpoint_interval,
+                report_path=args.report,
+                use_ghost=args.ghost,
+                use_selfplay=args.selfplay,
+            )
 
     # Phase 2: Real game validation
     if not args.ascii_only:
