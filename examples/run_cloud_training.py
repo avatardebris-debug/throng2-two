@@ -196,6 +196,11 @@ def train_ascii(agent, episodes: int = 500,
             # A gets symmetric correction (mirror of B's race reward)
             rollout_a_reward -= b_race_total
 
+            # Track race stats
+            margin = abs(a_x - b_x)
+            racer.total_races += 1
+            racer.avg_margin = 0.95 * racer.avg_margin + 0.05 * margin
+
             # Report best of the two runs
             ep_reward = max(rollout_a_reward, rollout_b_reward)
             won = a_won or b_won
