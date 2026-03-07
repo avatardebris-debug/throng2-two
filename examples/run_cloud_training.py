@@ -38,6 +38,7 @@ from src.games.mario.mario_adapter import MarioAdapter
 from src.games.mario.mario_curriculum import MarioCurriculum
 from src.games.mario.mario_icm_agent import MarioICMAgent
 from src.games.mario.mario_ghost import GhostRacer
+from src.games.mario.mario_selfplay import DualRacer
 
 # Auto-detect PyTorch for GPU acceleration
 try:
@@ -99,7 +100,8 @@ def train_ascii(agent, episodes: int = 500,
                 save_path: str = "mario_agent.npz",
                 checkpoint_interval: int = 100,
                 report_path: str = "training_report.json",
-                use_ghost: bool = False):
+                use_ghost: bool = False,
+                use_selfplay: bool = False):
     """
     Fast training on ASCII simulator with ICM curiosity.
     ~14,000 steps/sec on CPU, much faster on GPU.
@@ -129,46 +131,106 @@ def train_ascii(agent, episodes: int = 500,
     if ghost:
         print("  Ghost racing: ENABLED")
 
+    # Self-play racing
+    racer = DualRacer() if use_selfplay else None
+    if racer:
+        print("  Self-play racing: ENABLED (dual rollouts)")
+
     for ep in range(episodes):
         level = curriculum.next_level()
-        obs = adapter.reset(level)
-        agent.reset()
-        ep_reward = 0.0
 
-        # Start ghost race
-        if ghost:
-            ghost.start_race(tier=curriculum.tier, level_width=level.width)
+        # ── Self-play mode: two rollouts on same level ────────
+        if racer:
+            import copy
+            adapter_b = MarioAdapter()
+            level_b = copy.deepcopy(level)
 
-        for step in range(max_steps):
-            action = agent.step(obs)
-            next_obs, reward, done, info = adapter.step(action)
+            # Rollout A
+            obs = adapter.reset(level)
+            agent.reset()
+            rollout_a_reward = 0.0
+            for step in range(max_steps):
+                action = agent.step(obs)
+                next_obs, reward, done, info = adapter.step(action)
+                rollout_a_reward += reward
+                total_steps += 1
+                agent.learn_with_next_obs(reward, done, next_obs)
+                obs = next_obs
+                if done:
+                    break
+            a_x = level.max_x_reached
+            a_won = level.won
+            a_steps = step + 1
 
-            # Add ghost-shaped reward
+            # Rollout B
+            obs = adapter_b.reset(level_b)
+            agent.reset()
+            rollout_b_reward = 0.0
+            for step in range(max_steps):
+                action = agent.step(obs)
+                next_obs, reward, done, info = adapter_b.step(action)
+                rollout_b_reward += reward
+                total_steps += 1
+                agent.learn_with_next_obs(reward, done, next_obs)
+                obs = next_obs
+                if done:
+                    break
+            b_x = level_b.max_x_reached
+            b_won = level_b.won
+
+            # Compare: winner gets bonus
+            margin = a_x - b_x
+            if margin > 0:
+                ep_reward = rollout_a_reward + 3.0 + abs(margin) * 0.2
+                won = a_won
+            elif margin < 0:
+                ep_reward = rollout_b_reward + 3.0 + abs(margin) * 0.2
+                won = b_won
+            else:
+                ep_reward = max(rollout_a_reward, rollout_b_reward)
+                won = a_won or b_won
+            progress = max(a_x, b_x) / max(1, level.width)
+
+        # ── Normal mode: single rollout ───────────────────────
+        else:
+            obs = adapter.reset(level)
+            agent.reset()
+            ep_reward = 0.0
+
+            # Start ghost race
             if ghost:
-                ghost_r = ghost.compute_reward(level.mario_col, step)
-                reward += ghost_r
+                ghost.start_race(tier=curriculum.tier, level_width=level.width)
 
-            ep_reward += reward
-            total_steps += 1
+            for step in range(max_steps):
+                action = agent.step(obs)
+                next_obs, reward, done, info = adapter.step(action)
 
-            agent.learn_with_next_obs(reward, done, next_obs)
-            obs = next_obs
+                # Add ghost-shaped reward
+                if ghost:
+                    ghost_r = ghost.compute_reward(level.mario_col, step)
+                    reward += ghost_r
 
-            if done:
-                break
+                ep_reward += reward
+                total_steps += 1
 
-        # End ghost race
-        ghost_info = {}
-        if ghost:
-            ghost_info = ghost.end_race(
-                won=level.won,
-                final_x=level.max_x_reached,
-                total_steps=step + 1,
-            )
-            ep_reward += ghost_info.get("bonus", 0.0)
+                agent.learn_with_next_obs(reward, done, next_obs)
+                obs = next_obs
 
-        won = level.won
-        progress = level.max_x_reached / max(1, level.width)
+                if done:
+                    break
+
+            # End ghost race
+            if ghost:
+                ghost_info = ghost.end_race(
+                    won=level.won,
+                    final_x=level.max_x_reached,
+                    total_steps=step + 1,
+                )
+                ep_reward += ghost_info.get("bonus", 0.0)
+
+            won = level.won
+            progress = level.max_x_reached / max(1, level.width)
+
         rewards.append(ep_reward)
         wins.append(int(won))
         tier_history.append(curriculum.tier)
@@ -196,6 +258,8 @@ def train_ascii(agent, episodes: int = 500,
             if ghost and ghost.has_ghost(curriculum.tier):
                 gs = ghost.ghost_stats(curriculum.tier)
                 ghost_str = f" | ghost_beaten={gs['ghost_beaten']}/{gs['races']}"
+            if racer:
+                ghost_str = f" | races={racer.total_races} margin={racer.avg_margin:.1f}"
             print(f"  Ep {ep:4d} | tier={curriculum.tier} "
                   f"| r={np.mean(recent_r):+6.2f} "
                   f"| win={np.mean(recent_w):.0%} "
@@ -342,6 +406,8 @@ def main():
                         help="Use numpy agent even if torch is available")
     parser.add_argument("--ghost", action="store_true",
                         help="Enable ghost racing self-play")
+    parser.add_argument("--selfplay", action="store_true",
+                        help="Enable dual-rollout self-play racing")
     args = parser.parse_args()
 
     print("=" * 60)
@@ -398,6 +464,7 @@ def main():
             checkpoint_interval=args.checkpoint_interval,
             report_path=args.report,
             use_ghost=args.ghost,
+            use_selfplay=args.selfplay,
         )
 
     # Phase 2: Real game validation
