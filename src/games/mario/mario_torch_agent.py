@@ -34,18 +34,75 @@ from torch.distributions import Categorical
 # ═══════════════════════════════════════════════════════════════
 
 class PolicyNetwork(nn.Module):
-    """Actor-Critic policy network."""
+    """
+    Actor-Critic policy network with CNN+CoordConv spatial encoder.
+
+    Splits the 378-dim observation into:
+      - Spatial: 320 values → reshape to (1, 16, 20) grid + 2 CoordConv channels
+      - Non-spatial: 58 values (position, physics, enemies, status)
+
+    Spatial stream: Conv2d → ReLU → MaxPool → Conv2d → ReLU → Flatten
+    Both streams concatenated → Dense → Actor + Critic heads
+    """
+
+    GRID_SIZE = 320    # 16 × 20 viewport tiles
+    GRID_H = 16
+    GRID_W = 20
 
     def __init__(self, obs_dim: int, n_actions: int,
-                 hidden1: int = 128, hidden2: int = 64):
+                 hidden1: int = 128, hidden2: int = 64,
+                 conv_channels: int = 16):
         super().__init__()
-        self.fc1 = nn.Linear(obs_dim, hidden1)
+
+        non_spatial_dim = obs_dim - self.GRID_SIZE  # 58
+
+        # Pre-compute CoordConv coordinate grids (registered as buffers)
+        y_coords = torch.linspace(0, 1, self.GRID_H).unsqueeze(1).expand(self.GRID_H, self.GRID_W)
+        x_coords = torch.linspace(0, 1, self.GRID_W).unsqueeze(0).expand(self.GRID_H, self.GRID_W)
+        self.register_buffer('x_coords', x_coords.unsqueeze(0))  # (1, H, W)
+        self.register_buffer('y_coords', y_coords.unsqueeze(0))  # (1, H, W)
+
+        # Spatial encoder: 3 input channels (tile_type + x_coord + y_coord)
+        self.conv1 = nn.Conv2d(3, conv_channels, kernel_size=3, padding=1)
+        self.pool1 = nn.MaxPool2d(2, 2)  # (16, 8, 10)
+        self.conv2 = nn.Conv2d(conv_channels, conv_channels * 2, kernel_size=3, padding=1)
+        # After pool1: (ch*2, 8, 10) → flatten = ch*2 * 8 * 10
+
+        conv_flat_dim = conv_channels * 2 * 8 * 10  # 2560 with 16 channels
+
+        # Combined MLP: spatial features + non-spatial features
+        combined_dim = conv_flat_dim + non_spatial_dim
+        self.fc1 = nn.Linear(combined_dim, hidden1)
         self.fc2 = nn.Linear(hidden1, hidden2)
         self.actor = nn.Linear(hidden2, n_actions)
         self.critic = nn.Linear(hidden2, 1)
 
     def forward(self, x):
-        h = torch.tanh(self.fc1(x))
+        batch_size = x.shape[0]
+
+        # Split spatial vs non-spatial
+        spatial_flat = x[:, :self.GRID_SIZE]
+        non_spatial = x[:, self.GRID_SIZE:]
+
+        # Reshape grid: (batch, 320) → (batch, 1, 16, 20)
+        grid = spatial_flat.reshape(batch_size, 1, self.GRID_H, self.GRID_W)
+
+        # Add CoordConv channels: (batch, 3, 16, 20)
+        x_ch = self.x_coords.expand(batch_size, -1, -1).unsqueeze(1)  # (B, 1, H, W)
+        y_ch = self.y_coords.expand(batch_size, -1, -1).unsqueeze(1)  # (B, 1, H, W)
+        grid = torch.cat([grid, x_ch, y_ch], dim=1)  # (B, 3, 16, 20)
+
+        # CNN spatial encoder
+        h = F.relu(self.conv1(grid))     # (B, 16, 16, 20)
+        h = self.pool1(h)                 # (B, 16, 8, 10)
+        h = F.relu(self.conv2(h))         # (B, 32, 8, 10)
+        h = h.reshape(batch_size, -1)     # (B, 2560)
+
+        # Concat with non-spatial features
+        h = torch.cat([h, non_spatial], dim=-1)  # (B, 2560+58)
+
+        # Policy MLP
+        h = torch.tanh(self.fc1(h))
         h = torch.tanh(self.fc2(h))
         logits = self.actor(h)
         value = self.critic(h).squeeze(-1)
