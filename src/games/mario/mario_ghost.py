@@ -76,7 +76,7 @@ class GhostRacer:
     def __init__(
         self,
         ghost_reward_scale: float = 0.1,
-        behind_penalty_scale: float = 0.05,
+        behind_penalty_scale: float = 0.02,
         overtake_bonus: float = 1.0,
         finish_bonus: float = 5.0,
         ghost_speed_multiplier: float = 1.0,
@@ -154,14 +154,17 @@ class GhostRacer:
         ghost_x = self._current_ghost.x_at(ghost_step)
 
         gap = agent_x - ghost_x  # positive = ahead, negative = behind
+
+        # Clamp gap to prevent reward snowballing when far behind
+        clamped_gap = max(-5, min(5, gap))
         reward = 0.0
 
-        if gap > 0:
-            # Agent is ahead — reward proportional to gap
-            reward += gap * self.ghost_reward_scale
-        elif gap < 0:
-            # Agent is behind — gentle penalty
-            reward += gap * self.behind_penalty_scale
+        if clamped_gap > 0:
+            # Agent is ahead — reward proportional to gap (capped)
+            reward += clamped_gap * self.ghost_reward_scale
+        elif clamped_gap < 0:
+            # Agent is behind — gentle penalty (capped)
+            reward += clamped_gap * self.behind_penalty_scale
 
         # Overtake bonus (one-time when passing the ghost)
         is_ahead = (gap > 0)
