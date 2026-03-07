@@ -37,6 +37,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from src.games.mario.mario_adapter import MarioAdapter
 from src.games.mario.mario_curriculum import MarioCurriculum
 from src.games.mario.mario_icm_agent import MarioICMAgent
+from src.games.mario.mario_ghost import GhostRacer
 
 # Auto-detect PyTorch for GPU acceleration
 try:
@@ -93,11 +94,12 @@ def load_agent(agent, path: str):
 # PHASE 1: ASCII TRAINING
 # ═══════════════════════════════════════════════════════════════
 
-def train_ascii(agent: MarioICMAgent, episodes: int = 500,
+def train_ascii(agent, episodes: int = 500,
                 max_steps: int = 400, log_interval: int = 20,
                 save_path: str = "mario_agent.npz",
                 checkpoint_interval: int = 100,
-                report_path: str = "training_report.json"):
+                report_path: str = "training_report.json",
+                use_ghost: bool = False):
     """
     Fast training on ASCII simulator with ICM curiosity.
     ~14,000 steps/sec on CPU, much faster on GPU.
@@ -122,15 +124,30 @@ def train_ascii(agent: MarioICMAgent, episodes: int = 500,
     t0 = time.perf_counter()
     total_steps = 0
 
+    # Ghost racing
+    ghost = GhostRacer() if use_ghost else None
+    if ghost:
+        print("  Ghost racing: ENABLED")
+
     for ep in range(episodes):
         level = curriculum.next_level()
         obs = adapter.reset(level)
         agent.reset()
         ep_reward = 0.0
 
+        # Start ghost race
+        if ghost:
+            ghost.start_race(tier=curriculum.tier, level_width=level.width)
+
         for step in range(max_steps):
             action = agent.step(obs)
             next_obs, reward, done, info = adapter.step(action)
+
+            # Add ghost-shaped reward
+            if ghost:
+                ghost_r = ghost.compute_reward(level.mario_col, step)
+                reward += ghost_r
+
             ep_reward += reward
             total_steps += 1
 
@@ -139,6 +156,16 @@ def train_ascii(agent: MarioICMAgent, episodes: int = 500,
 
             if done:
                 break
+
+        # End ghost race
+        ghost_info = {}
+        if ghost:
+            ghost_info = ghost.end_race(
+                won=level.won,
+                final_x=level.max_x_reached,
+                total_steps=step + 1,
+            )
+            ep_reward += ghost_info.get("bonus", 0.0)
 
         won = level.won
         progress = level.max_x_reached / max(1, level.width)
@@ -165,11 +192,15 @@ def train_ascii(agent: MarioICMAgent, episodes: int = 500,
             recent_w = wins[-log_interval:]
             elapsed = time.perf_counter() - t0
             sps = total_steps / max(0.01, elapsed)
+            ghost_str = ""
+            if ghost and ghost.has_ghost(curriculum.tier):
+                gs = ghost.ghost_stats(curriculum.tier)
+                ghost_str = f" | ghost_beaten={gs['ghost_beaten']}/{gs['races']}"
             print(f"  Ep {ep:4d} | tier={curriculum.tier} "
                   f"| r={np.mean(recent_r):+6.2f} "
                   f"| win={np.mean(recent_w):.0%} "
                   f"| {sps:.0f} sps "
-                  f"| {elapsed:.0f}s")
+                  f"| {elapsed:.0f}s{ghost_str}")
 
     elapsed = time.perf_counter() - t0
     final_win = float(np.mean(wins[-20:]))
@@ -309,6 +340,8 @@ def main():
                         help="Path for JSON training report")
     parser.add_argument("--force-numpy", action="store_true",
                         help="Use numpy agent even if torch is available")
+    parser.add_argument("--ghost", action="store_true",
+                        help="Enable ghost racing self-play")
     args = parser.parse_args()
 
     print("=" * 60)
@@ -364,6 +397,7 @@ def main():
             save_path=args.save,
             checkpoint_interval=args.checkpoint_interval,
             report_path=args.report,
+            use_ghost=args.ghost,
         )
 
     # Phase 2: Real game validation
@@ -378,7 +412,7 @@ def main():
     # Suggest git push
     print()
     print("  Done! To push results back to GitHub:")
-    print("    git add mario_agent*.npz training_report.json")
+    print("    git add mario_agent*.pt mario_agent*.npz training_report.json")
     print("    git commit -m 'Training results: %(ep)s episodes'" % {"ep": args.episodes})
     print("    git push origin main")
     print("=" * 60)
