@@ -150,9 +150,9 @@ class MarioSimulator:
     R_BRICK_BREAK = 0.1
     R_QUESTION_HIT = 0.3
     R_ENEMY_STOMP = 1.0
-    R_PROGRESS = 0.1     # Per new rightmost position reached
+    R_PROGRESS = 0.5      # Per new rightmost position (was 0.1 — too weak)
     R_WIN = 10.0
-    R_DEATH = -5.0
+    R_DEATH = -1.0         # Was -5.0 — too punishing, agent prefers standing still
 
     def __init__(
         self,

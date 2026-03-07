@@ -202,12 +202,11 @@ def train_ascii(agent: MarioICMAgent, episodes: int = 500,
         "tier_history": tier_history,
         "checkpoints": checkpoints,
         "hyperparams": {
-            "lr": agent._lr,
+            "lr": getattr(agent, '_lr', getattr(agent, 'policy_optimizer', None) and agent.policy_optimizer.param_groups[0]['lr'] if hasattr(agent, 'policy_optimizer') else 0),
             "gamma": agent.gamma,
             "rollout_length": agent.rollout_length,
             "icm_lambda": agent.intrinsic_lambda,
-            "icm_feature_dim": agent.icm.feature_dim,
-            "icm_lr": agent.icm.lr,
+            "backend": "torch" if hasattr(agent, 'policy') else "numpy",
         },
     }
     with open(report_path, "w") as f:
