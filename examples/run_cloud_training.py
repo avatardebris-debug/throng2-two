@@ -144,12 +144,15 @@ def train_ascii(agent, episodes: int = 500,
             import copy
             adapter_b = MarioAdapter()
             level_b = copy.deepcopy(level)
+            race_scale = 0.005  # small per-step reward
 
-            # Rollout A
+            # Rollout A — record x positions for comparison
             obs = adapter.reset(level)
             agent.reset()
             rollout_a_reward = 0.0
+            a_positions = []
             for step in range(max_steps):
+                a_positions.append(level.mario_col)
                 action = agent.step(obs)
                 next_obs, reward, done, info = adapter.step(action)
                 rollout_a_reward += reward
@@ -162,13 +165,25 @@ def train_ascii(agent, episodes: int = 500,
             a_won = level.won
             a_steps = step + 1
 
-            # Rollout B
+            # Rollout B — per-step comparison to A's recorded positions
             obs = adapter_b.reset(level_b)
             agent.reset()
             rollout_b_reward = 0.0
+            b_race_total = 0.0
             for step in range(max_steps):
                 action = agent.step(obs)
                 next_obs, reward, done, info = adapter_b.step(action)
+
+                # Per-step race reward: +0.005 if ahead, -0.005 if behind
+                a_x_at_step = a_positions[step] if step < len(a_positions) else a_x
+                b_x_at_step = level_b.mario_col
+                if b_x_at_step > a_x_at_step:
+                    reward += race_scale
+                    b_race_total += race_scale
+                elif b_x_at_step < a_x_at_step:
+                    reward -= race_scale
+                    b_race_total -= race_scale
+
                 rollout_b_reward += reward
                 total_steps += 1
                 agent.learn_with_next_obs(reward, done, next_obs)
@@ -178,17 +193,12 @@ def train_ascii(agent, episodes: int = 500,
             b_x = level_b.max_x_reached
             b_won = level_b.won
 
-            # Compare: winner gets bonus
-            margin = a_x - b_x
-            if margin > 0:
-                ep_reward = rollout_a_reward + 3.0 + abs(margin) * 0.2
-                won = a_won
-            elif margin < 0:
-                ep_reward = rollout_b_reward + 3.0 + abs(margin) * 0.2
-                won = b_won
-            else:
-                ep_reward = max(rollout_a_reward, rollout_b_reward)
-                won = a_won or b_won
+            # A gets symmetric correction (mirror of B's race reward)
+            rollout_a_reward -= b_race_total
+
+            # Report best of the two runs
+            ep_reward = max(rollout_a_reward, rollout_b_reward)
+            won = a_won or b_won
             progress = max(a_x, b_x) / max(1, level.width)
 
         # ── Normal mode: single rollout ───────────────────────
