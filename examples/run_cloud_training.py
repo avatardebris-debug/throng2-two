@@ -38,43 +38,54 @@ from src.games.mario.mario_adapter import MarioAdapter
 from src.games.mario.mario_curriculum import MarioCurriculum
 from src.games.mario.mario_icm_agent import MarioICMAgent
 
+# Auto-detect PyTorch for GPU acceleration
+try:
+    import torch
+    from src.games.mario.mario_torch_agent import MarioTorchAgent
+    HAS_TORCH = True
+except ImportError:
+    HAS_TORCH = False
 
-def save_agent(agent: MarioICMAgent, path: str):
-    """Save agent weights to npz file."""
-    np.savez(path,
-        # Policy network
-        w1=agent.w1, b1=agent.b1,
-        w2=agent.w2, b2=agent.b2,
-        w_pi=agent.w_pi, b_pi=agent.b_pi,
-        w_v=agent.w_v, b_v=agent.b_v,
-        # ICM encoder
-        icm_enc_w1=agent.icm.enc_w1, icm_enc_b1=agent.icm.enc_b1,
-        icm_enc_w2=agent.icm.enc_w2, icm_enc_b2=agent.icm.enc_b2,
-        # ICM forward model
-        icm_fwd_w1=agent.icm.fwd_w1, icm_fwd_b1=agent.icm.fwd_b1,
-        icm_fwd_w2=agent.icm.fwd_w2, icm_fwd_b2=agent.icm.fwd_b2,
-        # ICM inverse model
-        icm_inv_w1=agent.icm.inv_w1, icm_inv_b1=agent.icm.inv_b1,
-        icm_inv_w2=agent.icm.inv_w2, icm_inv_b2=agent.icm.inv_b2,
-    )
+
+def save_agent(agent, path: str):
+    """Save agent weights (auto-detects torch vs numpy agent)."""
+    if isinstance(agent, MarioICMAgent):
+        np.savez(path,
+            w1=agent.w1, b1=agent.b1,
+            w2=agent.w2, b2=agent.b2,
+            w_pi=agent.w_pi, b_pi=agent.b_pi,
+            w_v=agent.w_v, b_v=agent.b_v,
+            icm_enc_w1=agent.icm.enc_w1, icm_enc_b1=agent.icm.enc_b1,
+            icm_enc_w2=agent.icm.enc_w2, icm_enc_b2=agent.icm.enc_b2,
+            icm_fwd_w1=agent.icm.fwd_w1, icm_fwd_b1=agent.icm.fwd_b1,
+            icm_fwd_w2=agent.icm.fwd_w2, icm_fwd_b2=agent.icm.fwd_b2,
+            icm_inv_w1=agent.icm.inv_w1, icm_inv_b1=agent.icm.inv_b1,
+            icm_inv_w2=agent.icm.inv_w2, icm_inv_b2=agent.icm.inv_b2,
+        )
+    else:
+        # Torch agent
+        pt_path = path.replace('.npz', '.pt')
+        agent.save(pt_path)
+        path = pt_path
     print(f"  Saved agent to {path}")
 
 
-def load_agent(agent: MarioICMAgent, path: str):
-    """Load agent weights from npz file."""
-    data = np.load(path)
-    # Policy
-    agent.w1 = data['w1']; agent.b1 = data['b1']
-    agent.w2 = data['w2']; agent.b2 = data['b2']
-    agent.w_pi = data['w_pi']; agent.b_pi = data['b_pi']
-    agent.w_v = data['w_v']; agent.b_v = data['b_v']
-    # ICM
-    agent.icm.enc_w1 = data['icm_enc_w1']; agent.icm.enc_b1 = data['icm_enc_b1']
-    agent.icm.enc_w2 = data['icm_enc_w2']; agent.icm.enc_b2 = data['icm_enc_b2']
-    agent.icm.fwd_w1 = data['icm_fwd_w1']; agent.icm.fwd_b1 = data['icm_fwd_b1']
-    agent.icm.fwd_w2 = data['icm_fwd_w2']; agent.icm.fwd_b2 = data['icm_fwd_b2']
-    agent.icm.inv_w1 = data['icm_inv_w1']; agent.icm.inv_b1 = data['icm_inv_b1']
-    agent.icm.inv_w2 = data['icm_inv_w2']; agent.icm.inv_b2 = data['icm_inv_b2']
+def load_agent(agent, path: str):
+    """Load agent weights (auto-detects format)."""
+    if isinstance(agent, MarioICMAgent):
+        data = np.load(path)
+        agent.w1 = data['w1']; agent.b1 = data['b1']
+        agent.w2 = data['w2']; agent.b2 = data['b2']
+        agent.w_pi = data['w_pi']; agent.b_pi = data['b_pi']
+        agent.w_v = data['w_v']; agent.b_v = data['b_v']
+        agent.icm.enc_w1 = data['icm_enc_w1']; agent.icm.enc_b1 = data['icm_enc_b1']
+        agent.icm.enc_w2 = data['icm_enc_w2']; agent.icm.enc_b2 = data['icm_enc_b2']
+        agent.icm.fwd_w1 = data['icm_fwd_w1']; agent.icm.fwd_b1 = data['icm_fwd_b1']
+        agent.icm.fwd_w2 = data['icm_fwd_w2']; agent.icm.fwd_b2 = data['icm_fwd_b2']
+        agent.icm.inv_w1 = data['icm_inv_w1']; agent.icm.inv_b1 = data['icm_inv_b1']
+        agent.icm.inv_w2 = data['icm_inv_w2']; agent.icm.inv_b2 = data['icm_inv_b2']
+    else:
+        agent.load(path)
     print(f"  Loaded agent from {path}")
 
 
@@ -297,6 +308,8 @@ def main():
                         help="Save checkpoint every N episodes (0=disabled)")
     parser.add_argument("--report", type=str, default="training_report.json",
                         help="Path for JSON training report")
+    parser.add_argument("--force-numpy", action="store_true",
+                        help="Use numpy agent even if torch is available")
     args = parser.parse_args()
 
     print("=" * 60)
@@ -307,20 +320,39 @@ def main():
     print(f"  ICM lambda: {args.icm_lambda}")
     print()
 
-    # Create agent
-    agent = MarioICMAgent(
-        obs_dim=378,
-        n_actions=6,
-        hidden1=128,
-        hidden2=64,
-        lr=args.lr,
-        gamma=0.99,
-        rollout_length=128,
-        icm_feature_dim=32,
-        icm_hidden_dim=64,
-        icm_lr=1e-3,
-        intrinsic_lambda=args.icm_lambda,
-    )
+    # Create agent — auto-detect torch
+    use_torch = HAS_TORCH and not args.force_numpy
+    if use_torch:
+        print(f"  Backend: PyTorch (GPU: {torch.cuda.is_available()})")
+        agent = MarioTorchAgent(
+            obs_dim=378,
+            n_actions=6,
+            hidden1=128,
+            hidden2=64,
+            lr=args.lr,
+            gamma=0.99,
+            rollout_length=128,
+            icm_feature_dim=32,
+            icm_hidden_dim=64,
+            icm_lr=1e-3,
+            intrinsic_lambda=args.icm_lambda,
+        )
+    else:
+        print("  Backend: NumPy (CPU only)")
+        agent = MarioICMAgent(
+            obs_dim=378,
+            n_actions=6,
+            hidden1=128,
+            hidden2=64,
+            lr=args.lr,
+            gamma=0.99,
+            rollout_length=128,
+            icm_feature_dim=32,
+            icm_hidden_dim=64,
+            icm_lr=1e-3,
+            intrinsic_lambda=args.icm_lambda,
+        )
+    print()
 
     if args.load:
         load_agent(agent, args.load)
