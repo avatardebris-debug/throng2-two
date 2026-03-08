@@ -4,22 +4,16 @@ mario_paired.py -- PAIRED Adversarial Level Design for Mario ASCII.
 Protagonist-Antagonist Induced Regret Environment Design:
   - Generator (Antagonist): creates levels that are LEGAL but HARD for the agent
   - Agent (Protagonist): tries to beat the generated levels
-  - Generator gets reward for: legality × (1 - agent_win_rate)
+  - Generator gets reward for: legality * (1 - agent_win_rate)
   - Agent gets reward for: beating levels
 
-This creates an automatic difficulty arms race: as the agent improves,
-the generator has to create harder levels. As levels get harder, the agent
-has to improve to beat them.
-
-Zone of Proximal Development: generator is penalized for levels that are
-TOO hard (agent never wins -- no learning signal) or TOO easy (agent always
-wins -- no challenge). Sweet spot is ~30-70% win rate.
+WARMUP PHASE: Before adversarial training, the GAN is pre-trained on
+curriculum-generated levels so it knows what valid levels look like.
 
 Usage:
     paired = PAIREDTrainer(agent, gan)
     for epoch in range(1000):
         result = paired.step()
-        # Generator and agent both improve
 """
 
 from __future__ import annotations
@@ -29,22 +23,17 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 
 from .mario_adapter import MarioAdapter
+from .mario_curriculum import MarioCurriculum
 from .mario_gan import MarioGAN
 from .mario_simulator import MarioSimulator
 
 
 class PAIREDTrainer:
     """
-    PAIRED orchestrator: couples GAN level generation with RL agent training.
+    PAIRED orchestrator with warmup phase.
 
-    Each step:
-      1. Generator creates a batch of levels
-      2. Agent attempts each level (quick rollout)
-      3. Levels are classified: agent-won (too easy) vs agent-lost (good difficulty)
-      4. Structural validator scores legality
-      5. Generator is rewarded for: legal + agent_loses
-         Generator is penalized for: illegal OR too_easy OR impossible
-      6. Both generator and agent update
+    Phase 1 (warmup): Generate curriculum levels, play them, pre-train GAN
+    Phase 2 (adversarial): GAN generates levels, agent plays, both improve
     """
 
     def __init__(
@@ -55,81 +44,128 @@ class PAIREDTrainer:
         max_steps: int = 400,
         target_win_rate: float = 0.5,
         difficulty_window: int = 50,
+        warmup_levels: int = 200,
+        warmup_pretrain_epochs: int = 100,
+        gan_mix_ratio: float = 0.5,
         seed: int = 42,
     ):
-        """
-        Args:
-            agent: RL agent (MarioTorchAgent or MarioICMAgent)
-            gan: MarioGAN instance (creates one if None)
-            batch_size: levels generated per step
-            max_steps: max steps per agent rollout
-            target_win_rate: ideal difficulty (~50% = zone of proximal development)
-            difficulty_window: window size for tracking agent win rate
-        """
         self.agent = agent
         self.gan = gan or MarioGAN()
         self.batch_size = batch_size
         self.max_steps = max_steps
         self.target_win_rate = target_win_rate
+        self.gan_mix_ratio = gan_mix_ratio
 
         self.adapter = MarioAdapter()
+        self.curriculum = MarioCurriculum(start_tier=1, advance_threshold=0.7, seed=seed)
         self.rng = np.random.RandomState(seed)
 
-        # Current difficulty tier (starts at 1, adapts based on agent performance)
         self.current_tier = 1
-
-        # Tracking
         self._win_history: List[bool] = []
         self._difficulty_window = difficulty_window
         self.total_episodes = 0
         self.total_steps = 0
         self.gen_updates = 0
         self.tier_advances = 0
-
-        # Stats per step
         self._step_stats: List[Dict[str, float]] = []
+
+        # Warmup config
+        self._warmup_levels = warmup_levels
+        self._warmup_pretrain_epochs = warmup_pretrain_epochs
+        self._warmed_up = False
 
     @property
     def win_rate(self) -> float:
-        """Recent agent win rate."""
         recent = self._win_history[-self._difficulty_window:]
         return sum(recent) / max(len(recent), 1)
 
-    def step(self) -> Dict[str, Any]:
+    def warmup(self):
         """
-        One PAIRED training step:
-          1. Generate batch of levels
-          2. Agent plays each
-          3. Score & train generator
-          4. Adapt difficulty tier
+        Phase 1: Generate curriculum levels, play them, pre-train GAN.
+        This teaches the GAN what valid Mario levels look like.
+        """
+        import time
+        t0 = time.perf_counter()
 
-        Returns:
-            dict with training stats
-        """
-        good_levels = []   # Levels the agent beat (too easy for generator)
-        hard_levels = []   # Levels the agent lost (good for generator)
+        print("  -- WARMUP: Pre-training GAN on curriculum levels --")
+
+        for i in range(self._warmup_levels):
+            level = self.curriculum.next_level()
+
+            # Play the level (trains the agent too)
+            ep_reward, won, steps = self._play_level(level)
+            self.total_episodes += 1
+            self.total_steps += steps
+            self._win_history.append(won)
+
+            # Convert to one-hot and add to GAN's solved bank
+            grid_onehot = self.gan.grid_to_onehot(level)
+            self.gan.add_solved(grid_onehot)
+
+            # Track curriculum progression
+            progress = level.max_x_reached / max(1, level.width)
+            self.curriculum.record_result(won=won, progress=progress,
+                                          steps=steps, level=level)
+            if self.curriculum.should_advance():
+                old = self.curriculum.tier
+                new = self.curriculum.advance()
+                print(f"    Warmup: tier {old} -> {new}")
+
+            if (i + 1) % 50 == 0:
+                elapsed = time.perf_counter() - t0
+                wr = self.win_rate
+                print(f"    Warmup {i+1}/{self._warmup_levels} "
+                      f"| tier={self.curriculum.tier} "
+                      f"| wr={wr:.0%} "
+                      f"| bank={len(self.gan.solved_bank)} "
+                      f"| {elapsed:.0f}s")
+
+        # Pre-train GAN on collected levels
+        print(f"  -- Pre-training GAN on {len(self.gan.solved_bank)} levels "
+              f"({self._warmup_pretrain_epochs} epochs) --")
+        pretrain_result = self.gan.pretrain_from_solved(
+            epochs=self._warmup_pretrain_epochs, batch_size=32
+        )
+        print(f"    Pretrain loss: {pretrain_result['pretrain_loss']:.4f}")
+
+        self.current_tier = self.curriculum.tier
+        self._warmed_up = True
+
+        elapsed = time.perf_counter() - t0
+        print(f"  -- Warmup complete: {elapsed:.0f}s, "
+              f"tier={self.current_tier}, bank={len(self.gan.solved_bank)} --")
+        print()
+
+    def step(self) -> Dict[str, Any]:
+        """One PAIRED training step with curriculum fallback."""
+        good_levels = []
+        hard_levels = []
         invalid_levels = 0
         total_reward = 0.0
         wins = 0
         step_count = 0
+        gan_generated = 0
 
-        # ── Generate and evaluate batch ──────────────────────
         for _ in range(self.batch_size):
-            # Generator creates a level
-            sim = self.gan.generate(tier=self.current_tier, temperature=0.8)
+            # Decide: GAN level or curriculum level?
+            use_gan = self.rng.random() < self.gan_mix_ratio and self._warmed_up
 
-            if sim is None:
-                invalid_levels += 1
-                continue
-
-            # Validate structure
-            validation = MarioGAN.validate_structure(sim.grid)
-            if not validation["valid"] or validation["score"] < 0.5:
-                invalid_levels += 1
-                # Still give the GAN the bad level to learn from
-                bad_grid = self.gan.grid_to_onehot(sim)
-                hard_levels.append(bad_grid)  # Treated as "negative" for discriminator
-                continue
+            if use_gan:
+                sim = self.gan.generate(tier=self.current_tier, temperature=0.8)
+                if sim is None:
+                    invalid_levels += 1
+                    sim = self.curriculum.next_level()
+                else:
+                    validation = MarioGAN.validate_structure(sim.grid)
+                    if not validation["valid"] or validation["score"] < 0.5:
+                        invalid_levels += 1
+                        bad_grid = self.gan.grid_to_onehot(sim)
+                        hard_levels.append(bad_grid)
+                        sim = self.curriculum.next_level()
+                    else:
+                        gan_generated += 1
+            else:
+                sim = self.curriculum.next_level()
 
             # Agent plays the level
             ep_reward, won, steps = self._play_level(sim)
@@ -139,7 +175,7 @@ class PAIREDTrainer:
 
             if won:
                 good_levels.append(level_grid)
-                self.gan.add_solved(level_grid)  # Add to imitation bank
+                self.gan.add_solved(level_grid)
                 wins += 1
             else:
                 hard_levels.append(level_grid)
@@ -149,43 +185,49 @@ class PAIREDTrainer:
             step_count += steps
             self.total_episodes += 1
 
+            # Track curriculum
+            progress = sim.max_x_reached / max(1, sim.width)
+            self.curriculum.record_result(won=won, progress=progress,
+                                          steps=steps, level=sim)
+
         self.total_steps += step_count
 
-        # ── Train generator ──────────────────────────────────
+        # Train generator
         gan_stats = {"d_loss": 0, "g_loss": 0}
         if good_levels or hard_levels:
-            # In PAIRED: good_levels = agent won = "too easy" for generator
-            #             hard_levels = agent lost = "good difficulty"
-            # We FLIP the labels for the GAN:
-            #   - hard_levels → "good" (generator did well, stumped the agent)
-            #   - good_levels → "bad" (generator failed, agent won)
             gan_stats = self.gan.train_step(
-                good_levels=hard_levels,   # Agent failed → good for generator
-                bad_levels=good_levels,     # Agent won → bad for generator
+                good_levels=hard_levels,
+                bad_levels=good_levels,
             )
             self.gen_updates += 1
 
-        # ── Adapt difficulty ─────────────────────────────────
+        # Adapt tier
         tier_changed = False
         wr = self.win_rate
-        if len(self._win_history) >= self._difficulty_window:
-            if wr > 0.7 and self.current_tier < 7:
-                self.current_tier += 1
-                self.tier_advances += 1
-                tier_changed = True
-            elif wr < 0.15 and self.current_tier > 1:
-                self.current_tier -= 1
-                tier_changed = True
+        if self.curriculum.should_advance():
+            old = self.curriculum.tier
+            new = self.curriculum.advance()
+            self.current_tier = new
+            self.tier_advances += 1
+            tier_changed = True
+        elif wr < 0.15 and self.current_tier > 1:
+            self.current_tier -= 1
+            tier_changed = True
 
-        # ── Compile stats ────────────────────────────────────
+        # Gradually increase GAN mix as it improves
+        if gan_generated > 0 and invalid_levels < self.batch_size // 2:
+            self.gan_mix_ratio = min(0.9, self.gan_mix_ratio + 0.01)
+
         valid = self.batch_size - invalid_levels
         stats = {
             "tier": self.current_tier,
             "wins": wins,
             "valid_levels": valid,
             "invalid_levels": invalid_levels,
+            "gan_generated": gan_generated,
+            "gan_mix": round(self.gan_mix_ratio, 2),
             "win_rate": round(wr, 3),
-            "avg_reward": round(total_reward / max(valid, 1), 2),
+            "avg_reward": round(total_reward / max(self.batch_size, 1), 2),
             "steps": step_count,
             "tier_changed": tier_changed,
             **gan_stats,
@@ -194,12 +236,6 @@ class PAIREDTrainer:
         return stats
 
     def _play_level(self, sim: MarioSimulator):
-        """
-        Agent attempts one level.
-
-        Returns:
-            (total_reward, won, steps)
-        """
         obs = self.adapter.reset(sim)
         self.agent.reset()
         total_reward = 0.0
@@ -208,10 +244,8 @@ class PAIREDTrainer:
             action = self.agent.step(obs)
             next_obs, reward, done, info = self.adapter.step(action)
             total_reward += reward
-
             self.agent.learn_with_next_obs(reward, done, next_obs)
             obs = next_obs
-
             if done:
                 break
 
@@ -223,17 +257,6 @@ class PAIREDTrainer:
         log_interval: int = 10,
         checkpoint_fn=None,
     ) -> List[Dict[str, Any]]:
-        """
-        Run PAIRED training loop.
-
-        Args:
-            n_steps: number of PAIRED steps (each generates batch_size levels)
-            log_interval: print stats every N steps
-            checkpoint_fn: called every 100 steps with (step, agent, gan)
-
-        Returns:
-            list of per-step stats
-        """
         import time
         t0 = time.perf_counter()
 
@@ -243,6 +266,12 @@ class PAIREDTrainer:
         print(f"  Target win rate: {self.target_win_rate:.0%}")
         print("=" * 60)
 
+        # Phase 1: Warmup
+        if not self._warmed_up:
+            self.warmup()
+
+        # Phase 2: Adversarial training
+        print("  -- Phase 2: Adversarial Training --")
         all_stats = []
 
         for i in range(n_steps):
@@ -255,11 +284,14 @@ class PAIREDTrainer:
                 print(f"  Step {i:4d} | tier={stats['tier']} "
                       f"| wr={stats['win_rate']:.0%} "
                       f"| valid={stats['valid_levels']}/{self.batch_size} "
+                      f"| gan={stats['gan_generated']}/{self.batch_size} "
+                      f"| mix={stats['gan_mix']:.0%} "
                       f"| r={stats['avg_reward']:+.1f} "
-                      f"| g={stats.get('g_loss', 0):.3f} "
-                      f"| d={stats.get('d_loss', 0):.3f} "
                       f"| {sps:.0f} sps "
                       f"| {elapsed:.0f}s")
+
+            if stats.get("tier_changed"):
+                print(f"  >>> TIER CHANGE -> {stats['tier']}")
 
             if checkpoint_fn and (i + 1) % 100 == 0:
                 checkpoint_fn(i + 1, self.agent, self.gan)
@@ -270,13 +302,13 @@ class PAIREDTrainer:
               f"{self.total_episodes} episodes, "
               f"{elapsed:.0f}s")
         print(f"  Final tier: {self.current_tier}, "
-              f"Win rate: {self.win_rate:.0%}")
+              f"Win rate: {self.win_rate:.0%}, "
+              f"GAN mix: {self.gan_mix_ratio:.0%}")
         print("=" * 60)
 
         return all_stats
 
     def report(self) -> Dict[str, Any]:
-        """Summary report."""
         return {
             "total_episodes": self.total_episodes,
             "total_steps": self.total_steps,
@@ -284,5 +316,6 @@ class PAIREDTrainer:
             "win_rate": self.win_rate,
             "tier_advances": self.tier_advances,
             "gen_updates": self.gen_updates,
+            "gan_mix_ratio": self.gan_mix_ratio,
             "gan_report": self.gan.report(),
         }
