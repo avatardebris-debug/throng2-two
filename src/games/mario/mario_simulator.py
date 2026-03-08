@@ -413,7 +413,7 @@ class MarioSimulator:
             if e.row == self.mario_row and e.col == self.mario_col:
                 # Same cell — kill Mario (side contact)
                 result["mario_died"] = True
-                result["death_reason"] = f"touched_{e.etype.name}"
+                result["death_reason"] = f"touched_{e.etype.name if hasattr(e.etype, 'name') else e.etype}"
 
             elif (e.row == self.mario_row + 1 and e.col == self.mario_col
                   and self.vy >= 0 and not self.on_ground):
