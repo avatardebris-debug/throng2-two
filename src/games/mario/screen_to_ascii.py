@@ -219,31 +219,28 @@ def _color_distance(c1: Tuple[int, ...], c2: Tuple[int, ...]) -> float:
 
 def _classify_tile_by_color(
     tile_pixels: np.ndarray,
-    threshold: float = 80.0,
+    threshold: float = 60.0,
 ) -> Tile:
     """
     Classify a tile region by its dominant color.
 
     Uses center 50% of tile pixels to avoid border/highlight artifacts.
-
-    Args:
-        tile_pixels: (H, W, 3) uint8 RGB tile image
-        threshold: max color distance for a match
-
-    Returns:
-        Best matching Tile type
+    Tighter threshold (60) to reduce false positives.
     """
     h, w = tile_pixels.shape[:2]
-    # Use center region (avoid borders that shift mean color)
     margin_h = max(1, h // 4)
     margin_w = max(1, w // 4)
     center = tile_pixels[margin_h:h-margin_h, margin_w:w-margin_w]
     if center.size == 0:
-        center = tile_pixels  # Fallback for very small tiles
+        center = tile_pixels
 
     mean_color = tuple(int(c) for c in center.mean(axis=(0, 1)))
 
-    # Match against tile palette (not entities — those are detected separately)
+    # Sky detection: high blue component, low red/green
+    r, g, b = mean_color
+    if b > 180 and r < 120 and g < 180:
+        return Tile.EMPTY  # Definitely sky
+
     best_tile = Tile.EMPTY
     best_dist = float("inf")
 
@@ -255,7 +252,7 @@ def _classify_tile_by_color(
                 best_tile = tile_type
 
     if best_dist > threshold:
-        return Tile.EMPTY  # Unknown = sky
+        return Tile.EMPTY
 
     return best_tile
 
@@ -323,47 +320,62 @@ def _detect_entities(
     Detect Mario and enemies by looking for concentrated entity-colored pixels.
     More robust than per-tile classification for small sprites.
     """
-    # Count red pixels (Mario) per tile
-    red_mask = (image[:, :, 0] > 200) & (image[:, :, 1] < 80) & (image[:, :, 2] < 80)
+    # Count red pixels (Mario) — tight: pure red only
+    red_mask = (image[:, :, 0] > 200) & (image[:, :, 1] < 60) & (image[:, :, 2] < 60)
 
-    # Count brown pixels (Goomba) per tile
-    brown_mask = ((image[:, :, 0] > 130) & (image[:, :, 0] < 200)
-                  & (image[:, :, 1] > 50) & (image[:, :, 1] < 120)
-                  & (image[:, :, 2] > 20) & (image[:, :, 2] < 80))
+    # Count skin pixels (Mario's face/hands) — confirms it's Mario not a red enemy
+    skin_mask = ((image[:, :, 0] > 220) & (image[:, :, 1] > 150) & (image[:, :, 1] < 220)
+                 & (image[:, :, 2] > 120) & (image[:, :, 2] < 180))
 
-    # Count green pixels (Turtle) per tile
-    green_mask = ((image[:, :, 1] > 140) & (image[:, :, 0] < 60)
-                  & (image[:, :, 2] < 60))
+    # Count brown pixels (Goomba) — tighter range to avoid ground
+    brown_mask = ((image[:, :, 0] > 140) & (image[:, :, 0] < 190)
+                  & (image[:, :, 1] > 60) & (image[:, :, 1] < 110)
+                  & (image[:, :, 2] > 20) & (image[:, :, 2] < 70))
+
+    # Count green pixels (Turtle) — exclude pipe greens (darker)
+    green_mask = ((image[:, :, 1] > 140) & (image[:, :, 0] < 40)
+                  & (image[:, :, 2] < 40))
+
+    mario_candidates = []  # (red_ratio, row, col)
 
     for row in range(grid_rows):
         for col in range(grid_cols):
             y0, y1 = row * tile_h, (row + 1) * tile_h
             x0, x1 = col * tile_w, (col + 1) * tile_w
-            n_pixels = tile_h * tile_w
+            n_pixels = max(tile_h * tile_w, 1)
 
-            # Mario detection
+            # Mario detection: need BOTH red AND skin in same tile
             red_count = red_mask[y0:y1, x0:x1].sum()
-            if red_count > n_pixels * 0.15:  # >15% red pixels
-                if entities["mario_pos"] is None:
-                    entities["mario_pos"] = (row, col)
-                    grid[row, col] = Tile.PLAYER
+            skin_count = skin_mask[y0:y1, x0:x1].sum()
+            red_ratio = red_count / n_pixels
+            skin_ratio = skin_count / n_pixels
+            if red_ratio > 0.10 and skin_ratio > 0.05:
+                mario_candidates.append((red_ratio + skin_ratio, row, col))
 
-            # Goomba detection
+            # Goomba detection — exclude ground/brick rows
             brown_count = brown_mask[y0:y1, x0:x1].sum()
-            if brown_count > n_pixels * 0.20:  # >20% brown
-                # Make sure it's not ground (ground is also brown)
-                if grid[row, col] not in (Tile.GROUND, Tile.BRICK):
-                    entities["enemies"].append({
-                        "type": "goomba", "row": row, "col": col
-                    })
+            if brown_count > n_pixels * 0.25:
+                if grid[row, col] not in (Tile.GROUND, Tile.BRICK, Tile.QUESTION):
+                    # Don't detect in bottom 3 rows (ground zone)
+                    if row < grid_rows - 3:
+                        entities["enemies"].append({
+                            "type": "goomba", "row": row, "col": col
+                        })
 
-            # Turtle detection
+            # Turtle detection — must not be a pipe tile
             green_count = green_mask[y0:y1, x0:x1].sum()
-            if green_count > n_pixels * 0.20:
-                if grid[row, col] not in (Tile.PIPE_L, Tile.PIPE_R):
+            if green_count > n_pixels * 0.25:
+                if grid[row, col] not in (Tile.PIPE_L, Tile.PIPE_R, Tile.FLAG):
                     entities["enemies"].append({
                         "type": "turtle", "row": row, "col": col
                     })
+
+    # Pick the best Mario candidate
+    if mario_candidates:
+        mario_candidates.sort(reverse=True)
+        _, mr, mc = mario_candidates[0]
+        entities["mario_pos"] = (mr, mc)
+        grid[mr, mc] = Tile.PLAYER
 
 
 # ═══════════════════════════════════════════════════════════════
