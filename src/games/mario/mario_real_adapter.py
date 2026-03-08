@@ -61,24 +61,25 @@ def _ensure_gym():
 # ACTION MAPPING
 # ═══════════════════════════════════════════════════════════════
 
-# Our simulator uses 6 actions (matching MarioAdapter):
-#   0: NOOP, 1: RIGHT, 2: RIGHT+JUMP, 3: LEFT, 4: JUMP, 5: RUN_RIGHT
+# Our simulator uses 8 actions:
+#   0: NOOP, 1: LEFT, 2: RIGHT, 3: JUMP, 4: JUMP_LEFT, 5: JUMP_RIGHT
+#   6: RUN_RIGHT, 7: RUN_JUMP
 #
-# gym-super-mario-bros uses NES joypad buttons:
-#   RIGHT_ONLY:  [NOOP, right]
-#   SIMPLE:      [NOOP, right, right+A, right+B, right+A+B, A, left]
-#   COMPLEX:     [all 256 combinations]
+# gym-super-mario-bros SIMPLE_MOVEMENT:
+#   0: NOOP, 1: right, 2: right+A, 3: right+B, 4: right+A+B, 5: A, 6: left
 #
-# We use SIMPLE_MOVEMENT and map our 6 actions to the 7 SIMPLE actions.
+# We map our 8 actions to the 7 SIMPLE actions:
 
 # Our action → SIMPLE_MOVEMENT index
 ACTION_MAP = {
-    0: 0,   # NOOP  → NOOP
-    1: 1,   # RIGHT → right
-    2: 2,   # RIGHT+JUMP → right + A (jump)
-    3: 6,   # LEFT  → left
-    4: 5,   # JUMP  → A
-    5: 3,   # RUN_RIGHT → right + B (run)
+    0: 0,   # NOOP       → NOOP
+    1: 6,   # LEFT       → left
+    2: 1,   # RIGHT      → right
+    3: 5,   # JUMP       → A
+    4: 6,   # JUMP_LEFT  → left (no left+jump in SIMPLE)
+    5: 2,   # JUMP_RIGHT → right + A (jump right)
+    6: 3,   # RUN_RIGHT  → right + B (run)
+    7: 4,   # RUN_JUMP   → right + A + B (run + jump)
 }
 
 SIMPLE_MOVEMENT = [

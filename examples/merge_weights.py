@@ -153,7 +153,7 @@ def evaluate_checkpoint(path, episodes=50, max_steps=400):
     from src.games.mario.mario_adapter import MarioAdapter
     from src.games.mario.mario_curriculum import MarioCurriculum
 
-    agent = MarioTorchAgent(obs_dim=378, n_actions=6)
+    agent = MarioTorchAgent(obs_dim=378, n_actions=8)
     agent.load(path)
 
     adapter = MarioAdapter()

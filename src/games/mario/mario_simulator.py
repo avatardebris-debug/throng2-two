@@ -79,8 +79,10 @@ class Action(IntEnum):
     JUMP       = 3
     JUMP_LEFT  = 4
     JUMP_RIGHT = 5
+    RUN_RIGHT  = 6  # Right + B (run speed)
+    RUN_JUMP   = 7  # Right + B + A (run speed + jump)
 
-N_ACTIONS = 6
+N_ACTIONS = 8
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -238,6 +240,7 @@ class MarioSimulator:
         # ── 1. Compute desired movement ────────────────────────────
         dx = 0
         want_jump = False
+        is_running = False
 
         if action == Action.LEFT:
             dx = -1
@@ -251,10 +254,18 @@ class MarioSimulator:
         elif action == Action.JUMP_RIGHT:
             dx = 1
             want_jump = True
+        elif action == Action.RUN_RIGHT:
+            dx = 2  # Run speed = 2 tiles/step
+            is_running = True
+        elif action == Action.RUN_JUMP:
+            dx = 2  # Run speed
+            want_jump = True
+            is_running = True
 
         # ── 2. Initiate jump ──────────────────────────────────────
         if want_jump and self.on_ground:
-            self.jump_timer = JUMP_DURATION
+            # Running jump lasts longer (farther arc)
+            self.jump_timer = JUMP_DURATION + (1 if is_running else 0)
             self.vy = -1  # Rising
             self.on_ground = False
 

@@ -37,7 +37,7 @@ except ImportError:
 from src.games.mario.mario_icm_agent import MarioICMAgent
 
 
-ACTION_NAMES = ["NOOP", "RIGHT", "R+JUMP", "LEFT", "JUMP", "RUN_R"]
+ACTION_NAMES = ["NOOP", "LEFT", "RIGHT", "JUMP", "J+LEFT", "J+RIGHT", "RUN_R", "R+B+A"]
 
 
 def render_sim_frame(sim, action, step, ep_reward, ep, won_count, total_eps):
@@ -96,9 +96,9 @@ def create_agent(args):
     """Create and optionally load agent."""
     use_torch = HAS_TORCH and not args.force_numpy
     if use_torch:
-        agent = MarioTorchAgent(obs_dim=378, n_actions=6, device="cpu")
+        agent = MarioTorchAgent(obs_dim=378, n_actions=8, device="cpu")
     else:
-        agent = MarioICMAgent(obs_dim=378, n_actions=6)
+        agent = MarioICMAgent(obs_dim=378, n_actions=8)
 
     if args.load:
         if args.load.endswith(".pt") and use_torch:

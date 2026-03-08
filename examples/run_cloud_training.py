@@ -444,7 +444,7 @@ def main():
         print(f"  Backend: PyTorch (GPU: {torch.cuda.is_available()})")
         agent = MarioTorchAgent(
             obs_dim=378,
-            n_actions=6,
+            n_actions=8,
             hidden1=128,
             hidden2=64,
             lr=args.lr,
@@ -459,7 +459,7 @@ def main():
         print("  Backend: NumPy (CPU only)")
         agent = MarioICMAgent(
             obs_dim=378,
-            n_actions=6,
+            n_actions=8,
             hidden1=128,
             hidden2=64,
             lr=args.lr,
