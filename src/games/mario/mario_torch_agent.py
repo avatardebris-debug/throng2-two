@@ -447,16 +447,49 @@ class MarioTorchAgent:
         }, path)
         print(f"  [TorchAgent] Saved to {path}")
 
+    def _expand_state_dict(self, state_dict: dict, model: torch.nn.Module,
+                           name: str) -> dict:
+        """
+        Copy checkpoint weights into model, expanding any mismatched layers.
+
+        For each parameter where checkpoint shape != model shape:
+          - Copy old values into the matching subregion
+          - Leave new rows/cols at the model's current (random) init values
+        """
+        model_params = dict(model.named_parameters())
+        result = {}
+        for key, ckpt_val in state_dict.items():
+            if key not in model_params:
+                result[key] = ckpt_val
+                continue
+            model_val = model_params[key]
+            if ckpt_val.shape == model_val.shape:
+                result[key] = ckpt_val
+            else:
+                # Expand: start from current (random) model weights
+                new_tensor = model_val.data.clone()
+                # Copy old values into the leading subregion
+                slices = tuple(slice(0, s) for s in ckpt_val.shape)
+                new_tensor[slices] = ckpt_val
+                result[key] = new_tensor
+                print(f"  [TorchAgent] Expanded {name}.{key}: "
+                      f"{list(ckpt_val.shape)} -> {list(model_val.shape)}")
+        return result
+
     def load(self, path: str):
-        """Load model from .pt file."""
+        """Load model from .pt file, handling action count mismatches."""
         data = torch.load(path, map_location=self.device, weights_only=False)
-        # Skip CoordConv buffers (x_coords, y_coords) -- they use expand()
-        # which shares memory and can't be loaded. They're deterministic
-        # so the ones created in __init__ are already correct.
+
+        # Skip CoordConv buffers (recreated correctly in __init__)
         policy_state = {k: v for k, v in data["policy"].items()
                         if k not in ("x_coords", "y_coords")}
+
+        policy_state = self._expand_state_dict(policy_state, self.policy, "policy")
         self.policy.load_state_dict(policy_state, strict=False)
-        self.icm.load_state_dict(data["icm"])
+
+        icm_state = self._expand_state_dict(data["icm"], self.icm, "icm")
+        self.icm.load_state_dict(icm_state, strict=False)
+
         if "policy_optimizer" in data:
             self.policy_optimizer.load_state_dict(data["policy_optimizer"])
         if "icm_optimizer" in data:
