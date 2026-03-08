@@ -71,9 +71,30 @@ COLORS = {
     "flag_white":   (252, 252, 252),  # Flagpole
     "flag_pole":    (172, 172, 172),  # Pole
 
-    # Platform
+    # Background scenery (NOT gameplay tiles — must be filtered OUT)
+    # NES Mario uses palette-swapped versions of clouds and bushes.
+    # Clouds appear in sky rows and use light blue / white.
+    # Bushes appear near ground and use a distinct green that is NOT pipe green.
+    "cloud_white":  (252, 252, 252),  # Cloud body (very bright white)
+    "cloud_light":  (120, 200, 252),  # Cloud highlight (light cyan)
+    "bush_green":   (0, 104, 0),      # Bush dark body (darker than pipe)
+    "bush_light":   (88, 176, 0),     # Bush highlight (yellow-green)
+    "bush_mid":     (0, 168, 40),     # Bush mid-tone (slightly off from pipe)
+
+    # Platform (gameplay — NOT scenery)
     "platform_gray":(168, 168, 168),  # Moving platforms
 }
+
+# Colors that indicate BACKGROUND SCENERY (ignore, return EMPTY)
+BACKGROUND_COLORS = [
+    COLORS["cloud_white"],
+    COLORS["cloud_light"],
+    COLORS["bush_green"],
+    COLORS["bush_light"],
+    COLORS["bush_mid"],
+    COLORS["flag_white"],   # Flagpole whites also appear in clouds
+]
+BACKGROUND_THRESHOLD = 50.0  # Tight match required to call it scenery
 
 # Tile type -> characteristic RGB colors (for matching)
 TILE_PALETTE = {
@@ -220,12 +241,13 @@ def _color_distance(c1: Tuple[int, ...], c2: Tuple[int, ...]) -> float:
 def _classify_tile_by_color(
     tile_pixels: np.ndarray,
     threshold: float = 60.0,
+    row: int = -1,
 ) -> Tile:
     """
     Classify a tile region by its dominant color.
 
     Uses center 50% of tile pixels to avoid border/highlight artifacts.
-    Tighter threshold (60) to reduce false positives.
+    Background scenery (clouds, bushes) is explicitly filtered to EMPTY.
     """
     h, w = tile_pixels.shape[:2]
     margin_h = max(1, h // 4)
@@ -235,11 +257,27 @@ def _classify_tile_by_color(
         center = tile_pixels
 
     mean_color = tuple(int(c) for c in center.mean(axis=(0, 1)))
-
-    # Sky detection: high blue component, low red/green
     r, g, b = mean_color
+
+    # Sky fast-path: high blue, low red
     if b > 180 and r < 120 and g < 180:
-        return Tile.EMPTY  # Definitely sky
+        return Tile.EMPTY
+
+    # Very bright white → cloud scenery, not a gameplay tile
+    if r > 230 and g > 230 and b > 230:
+        return Tile.EMPTY
+
+    # Background scenery check: match against known background colors
+    for bg_color in BACKGROUND_COLORS:
+        if _color_distance(mean_color, bg_color) < BACKGROUND_THRESHOLD:
+            return Tile.EMPTY
+
+    # Row-based background zone hints:
+    # Rows 1-4 are sky/cloud zone — pipes don't appear here in W1-1
+    if 0 < row <= 4:
+        # In the sky rows, green almost certainly means bush or scenery
+        if g > 100 and r < 80:
+            return Tile.EMPTY
 
     best_tile = Tile.EMPTY
     best_dist = float("inf")
@@ -291,7 +329,7 @@ def image_to_ascii(
             x1 = x0 + tile_w
 
             tile_pixels = image[y0:y1, x0:x1]
-            tile_type = _classify_tile_by_color(tile_pixels)
+            tile_type = _classify_tile_by_color(tile_pixels, row=row)
 
             if tile_type == Tile.PLAYER:
                 entities["mario_pos"] = (row, col)
