@@ -449,8 +449,13 @@ class MarioTorchAgent:
 
     def load(self, path: str):
         """Load model from .pt file."""
-        data = torch.load(path, map_location=self.device)
-        self.policy.load_state_dict(data["policy"])
+        data = torch.load(path, map_location=self.device, weights_only=False)
+        # Skip CoordConv buffers (x_coords, y_coords) -- they use expand()
+        # which shares memory and can't be loaded. They're deterministic
+        # so the ones created in __init__ are already correct.
+        policy_state = {k: v for k, v in data["policy"].items()
+                        if k not in ("x_coords", "y_coords")}
+        self.policy.load_state_dict(policy_state, strict=False)
         self.icm.load_state_dict(data["icm"])
         if "policy_optimizer" in data:
             self.policy_optimizer.load_state_dict(data["policy_optimizer"])
