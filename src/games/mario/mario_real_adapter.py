@@ -188,17 +188,25 @@ class MarioRealAdapter:
 
     def _frame_to_obs(self, frame: np.ndarray) -> np.ndarray:
         """
-        Convert NES pixel frame to our observation vector.
+        Convert NES pixel frame to observation matching simulator's get_obs().
 
-        Frame: (240, 256, 3) RGB → crop HUD → image_to_ascii → flatten
+        Simulator layout (378 dims):
+          [0:320]   viewport grid 16×20, normalized by N_TILE_TYPES
+          [320:322] mario_vp_row, mario_vp_col
+          [322:325] on_ground, vy, jump_timer
+          [325:327] coins, progress
+          [327:375] 8 enemies × 6 (etype, row, col, dangerous, shell, dir)
+          [375:378] alive, won, step_count
         """
+        from src.games.mario.mario_simulator import N_TILE_TYPES
+
         h, w = frame.shape[:2]
 
-        # Crop HUD (top ~32 pixels for 240-height, scale proportionally)
+        # Crop HUD (top ~32 pixels)
         hud_px = int(h * 32 / 240)
         game_frame = frame[hud_px:]
 
-        # Convert to ASCII grid
+        # Convert to ASCII grid (14×16)
         grid, entities = self._image_to_ascii(
             game_frame,
             grid_rows=self.GAME_ROWS,
@@ -208,31 +216,56 @@ class MarioRealAdapter:
         self._last_grid = grid
         self._last_entities = entities
 
-        # Build observation vector (matching MarioAdapter format)
+        # === Build 378-dim observation matching simulator exactly ===
         obs = np.zeros(self.obs_dim, dtype=np.float32)
 
-        # Grid tiles (normalized to 0-1)
-        grid_flat = grid.flatten().astype(np.float32) / 10.0
-        obs[:len(grid_flat)] = grid_flat
+        # [0:320] Viewport grid: resize 14×16 → 16×20, normalized
+        viewport = np.zeros((16, 20), dtype=np.float32)
+        # Place the 14×16 game grid centered in the 16×20 viewport
+        r_off = 1  # offset 1 row down (HUD gap)
+        c_off = 2  # offset 2 cols right (center)
+        gr, gc = grid.shape
+        viewport[r_off:r_off+min(gr,15), c_off:c_off+min(gc,18)] = \
+            grid[:min(gr,15), :min(gc,18)].astype(np.float32)
+        viewport /= max(N_TILE_TYPES - 1, 1)
+        obs[0:320] = viewport.flatten()
 
-        # Mario position
-        idx = len(grid_flat)
-        if entities["mario_pos"]:
-            obs[idx] = entities["mario_pos"][0] / self.GAME_ROWS
-            obs[idx + 1] = entities["mario_pos"][1] / self.VIEWPORT_COLS
-        idx += 2
+        # [320:322] Mario position relative to viewport
+        mario_pos = entities.get("mario_pos")
+        if mario_pos:
+            obs[320] = (mario_pos[0] + r_off) / 16.0   # row
+            obs[321] = (mario_pos[1] + c_off) / 20.0   # col
+        else:
+            obs[320] = 0.75  # default: near ground
+            obs[321] = 0.5   # default: center
 
-        # Enemy positions (up to 5 enemies, 3 values each: type/row/col)
-        for i, enemy in enumerate(entities.get("enemies", [])[:5]):
-            base = idx + i * 3
-            type_map = {"goomba": 0.2, "turtle": 0.5, "piranha": 0.8}
-            obs[base] = type_map.get(enemy["type"], 0.1)
-            obs[base + 1] = enemy["row"] / self.GAME_ROWS
-            obs[base + 2] = enemy["col"] / self.VIEWPORT_COLS
-        idx += 15
+        # [322:325] Physics (estimated from frame changes)
+        obs[322] = 1.0   # on_ground (assume grounded)
+        obs[323] = 0.0   # vy (unknown from single frame)
+        obs[324] = 0.0   # jump_timer
 
-        # Coins, score, alive flag from info (if available)
-        obs[idx] = 1.0  # alive
+        # [325:327] Coins, progress
+        obs[325] = 0.0   # coins (could extract from HUD)
+        obs[326] = self._step_count / 2000.0  # rough progress proxy
+
+        # [327:375] Enemies (8 × 6 values each)
+        enemies = entities.get("enemies", [])[:8]
+        for i in range(8):
+            base = 327 + i * 6
+            if i < len(enemies):
+                e = enemies[i]
+                type_map = {"goomba": 1.0, "turtle": 2.0, "piranha": 3.0}
+                obs[base + 0] = type_map.get(e.get("type", ""), 1.0) / 3.0
+                obs[base + 1] = (e.get("row", 0) + r_off) / 16.0
+                obs[base + 2] = (e.get("col", 0) + c_off) / 20.0
+                obs[base + 3] = 1.0  # dangerous
+                obs[base + 4] = 0.0  # not shell
+                obs[base + 5] = -1.0  # moving left
+
+        # [375:378] Status
+        obs[375] = 1.0  # alive
+        obs[376] = 0.0  # not won
+        obs[377] = self._step_count / 1000.0
 
         return obs
 
