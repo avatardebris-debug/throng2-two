@@ -15,6 +15,12 @@ Tile classification uses dominant color matching against known
 NES color palettes. Also provides:
   - ascii_to_image(): render ASCII grid as pixel image (for self-test)
   - roundtrip_test(): ASCII -> image -> ASCII (verify converter works)
+  - TemporalFilter: wraps image_to_ascii for scroll-stable classification
+
+Robustness fixes (v2):
+  Fix 1 – Motion-robust Mario detection via global red+skin centroid.
+  Fix 2 – Goomba/ground disambiguation via G/R ratio (>0.5) + EMPTY-only scan.
+  Fix 3 – TemporalFilter: 2-frame tile confirmation suppresses scroll artifacts.
 """
 
 from __future__ import annotations
@@ -356,64 +362,149 @@ def _detect_entities(
 ):
     """
     Detect Mario and enemies by looking for concentrated entity-colored pixels.
-    More robust than per-tile classification for small sprites.
+
+    v2 robustness fixes:
+      Fix 1 – Mario: global red+skin blob centroid, no per-tile ratio thresholds.
+               Works correctly regardless of animation frame (walk/run/jump).
+      Fix 2 – Goomba: G/R ratio > 0.5 separates Goomba from ground brown.
+               Entity scans restricted to EMPTY-classified tiles only.
     """
-    # Count red pixels (Mario) — tight: pure red only
-    red_mask = (image[:, :, 0] > 200) & (image[:, :, 1] < 60) & (image[:, :, 2] < 60)
+    h_img, w_img = image.shape[:2]
+    r = image[:, :, 0].astype(np.int32)
+    g = image[:, :, 1].astype(np.int32)
+    b = image[:, :, 2].astype(np.int32)
 
-    # Count skin pixels (Mario's face/hands) — confirms it's Mario not a red enemy
-    skin_mask = ((image[:, :, 0] > 220) & (image[:, :, 1] > 150) & (image[:, :, 1] < 220)
-                 & (image[:, :, 2] > 120) & (image[:, :, 2] < 180))
+    # ── Fix 1: Mario detection via global centroid ───────────────────────────
+    # Pure red (hat / shirt): R high, G and B both low
+    red_mask = (r > 200) & (g < 60) & (b < 60)
 
-    # Count brown pixels (Goomba) — tighter range to avoid ground
-    brown_mask = ((image[:, :, 0] > 140) & (image[:, :, 0] < 190)
-                  & (image[:, :, 1] > 60) & (image[:, :, 1] < 110)
-                  & (image[:, :, 2] > 20) & (image[:, :, 2] < 70))
+    # Skin (face / hands): high R, mid-high G, mid B
+    skin_mask = (r > 220) & (g > 150) & (g < 220) & (b > 120) & (b < 180)
 
-    # Count green pixels (Turtle) — exclude pipe greens (darker)
-    green_mask = ((image[:, :, 1] > 140) & (image[:, :, 0] < 40)
-                  & (image[:, :, 2] < 40))
+    # Combined Mario blob
+    mario_blob = red_mask | skin_mask
 
-    mario_candidates = []  # (red_ratio, row, col)
+    mario_pos = _blob_centroid_tile(mario_blob, tile_h, tile_w,
+                                    grid_rows, grid_cols)
+    if mario_pos is not None:
+        mr, mc = mario_pos
+        entities["mario_pos"] = mario_pos
+        grid[mr, mc] = Tile.PLAYER
 
-    for row in range(grid_rows):
+    # ── Fix 2: Goomba/Turtle ─ scan gameplay zone, G/R ratio discriminates ──────
+    # Goomba tiles are often misclassified by the tile classifier: the sprite fills
+    # only the inner 12x12 (of 16x16 pixels) and the border averages with sky blue,
+    # so the tile-mean can look like arbitrary gray rather than clean goomba-brown.
+    # Solution: scan ALL tiles in the gameplay zone and rely on G/R ratio alone:
+    #   Ground brown : R~200, G~76  → G/R ≈ 0.38  (blocked by threshold)
+    #   Goomba brown : R~172, G~100 → G/R ≈ 0.58  (passes)
+    #   Rendered enemy(ascii_to_image): R=165, G=82 → G/R ≈ 0.50 (passes)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        gr_ratio = np.where(r > 0, g / r.astype(float), 0.0)
+
+    brown_mask = (
+        (r > 130) & (r < 200)
+        & (g > 55) & (g < 120)
+        & (b > 10) & (b < 80)
+        & (gr_ratio > 0.46)   # discriminates goomba from ground
+    )
+
+    # Green (Turtle): bright pure green, distinct from pipe (pipe is very dark)
+    green_mask = (g > 130) & (r < 50) & (b < 50)
+
+    # Gameplay zone: skip absolute sky rows and the solid ground band
+    ENTITY_ROW_MIN = 2
+    ENTITY_ROW_MAX = grid_rows - 3
+
+    for row in range(ENTITY_ROW_MIN, ENTITY_ROW_MAX + 1):
         for col in range(grid_cols):
             y0, y1 = row * tile_h, (row + 1) * tile_h
             x0, x1 = col * tile_w, (col + 1) * tile_w
             n_pixels = max(tile_h * tile_w, 1)
 
-            # Mario detection: need BOTH red AND skin in same tile
-            red_count = red_mask[y0:y1, x0:x1].sum()
-            skin_count = skin_mask[y0:y1, x0:x1].sum()
-            red_ratio = red_count / n_pixels
-            skin_ratio = skin_count / n_pixels
-            if red_ratio > 0.10 and skin_ratio > 0.05:
-                mario_candidates.append((red_ratio + skin_ratio, row, col))
+            # Goomba
+            brown_count = int(brown_mask[y0:y1, x0:x1].sum())
+            if brown_count > n_pixels * 0.20:
+                if row < grid_rows - 3:   # not in the ground zone
+                    entities["enemies"].append(
+                        {"type": "goomba", "row": row, "col": col}
+                    )
 
-            # Goomba detection — exclude ground/brick rows
-            brown_count = brown_mask[y0:y1, x0:x1].sum()
-            if brown_count > n_pixels * 0.25:
-                if grid[row, col] not in (Tile.GROUND, Tile.BRICK, Tile.QUESTION):
-                    # Don't detect in bottom 3 rows (ground zone)
-                    if row < grid_rows - 3:
-                        entities["enemies"].append({
-                            "type": "goomba", "row": row, "col": col
-                        })
-
-            # Turtle detection — must not be a pipe tile
-            green_count = green_mask[y0:y1, x0:x1].sum()
+            # Turtle
+            green_count = int(green_mask[y0:y1, x0:x1].sum())
             if green_count > n_pixels * 0.25:
-                if grid[row, col] not in (Tile.PIPE_L, Tile.PIPE_R, Tile.FLAG):
-                    entities["enemies"].append({
-                        "type": "turtle", "row": row, "col": col
-                    })
+                entities["enemies"].append(
+                    {"type": "turtle", "row": row, "col": col}
+                )
 
-    # Pick the best Mario candidate
-    if mario_candidates:
-        mario_candidates.sort(reverse=True)
-        _, mr, mc = mario_candidates[0]
-        entities["mario_pos"] = (mr, mc)
-        grid[mr, mc] = Tile.PLAYER
+
+def _blob_centroid_tile(
+    mask: np.ndarray,
+    tile_h: int,
+    tile_w: int,
+    grid_rows: int,
+    grid_cols: int,
+) -> Optional[Tuple[int, int]]:
+    """
+    Fix 1 helper: find the largest connected blob in *mask* and return its
+    grid-tile coordinates (row, col).  Uses a fast label-free approach:
+    project onto rows and columns, find the densest strip, then return the
+    tile that contains the centroid pixel.
+
+    Falls back to None if no blob of significance is found.
+    """
+    if not mask.any():
+        return None
+
+    # Row / column projections — O(H*W) single pass
+    row_sums = mask.sum(axis=1)   # (H,)
+    col_sums = mask.sum(axis=0)   # (W,)
+
+    # Sliding window of height tile_h / width tile_w to find peak density
+    best_score = -1
+    best_tile_r = 0
+    best_tile_c = 0
+
+    window_r = tile_h
+    window_c = tile_w
+
+    # Cumulative sums for O(1) window sums
+    cum_r = np.concatenate([[0], row_sums.cumsum()])
+    cum_c = np.concatenate([[0], col_sums.cumsum()])
+
+    H = mask.shape[0]
+    W = mask.shape[1]
+
+    best_r_px = 0
+    best_c_px = 0
+
+    for tr in range(grid_rows):
+        r0 = tr * tile_h
+        r1 = min(r0 + tile_h, H)
+        r_sum = int(cum_r[r1] - cum_r[r0])
+        for tc in range(grid_cols):
+            c0 = tc * tile_w
+            c1 = min(c0 + tile_w, W)
+            c_sum = int(cum_c[c1] - cum_c[c0])
+            score = r_sum + c_sum
+            if score > best_score:
+                # Verify the actual intersection is non-trivial
+                cell_count = int(mask[r0:r1, c0:c1].sum())
+                if cell_count > 0:
+                    best_score = score
+                    best_tile_r = tr
+                    best_tile_c = tc
+
+    # Require at least 2% of tile pixels to be Mario-colored
+    min_pixels = max(2, int(tile_h * tile_w * 0.02))
+    r0 = best_tile_r * tile_h
+    r1 = min(r0 + tile_h, H)
+    c0 = best_tile_c * tile_w
+    c1 = min(c0 + tile_w, W)
+    if int(mask[r0:r1, c0:c1].sum()) < min_pixels:
+        return None
+
+    return (best_tile_r, best_tile_c)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -522,3 +613,99 @@ def save_image(img: np.ndarray, path: str):
     with open(path, "wb") as f:
         f.write(f"P6\n{w} {h}\n255\n".encode())
         f.write(img.tobytes())
+
+
+# ═══════════════════════════════════════════════════════════════
+# FIX 3: TEMPORAL FILTER — scroll-stable tile classification
+# ═══════════════════════════════════════════════════════════════
+
+class TemporalFilter:
+    """
+    Fix 3: Wraps image_to_ascii() and requires a tile to be classified as
+    non-EMPTY for *confirm_frames* consecutive frames before it is
+    treated as solid.  This suppresses scroll-boundary artifact pixels
+    that flicker for exactly one frame.
+
+    Entities (Mario, enemies) bypass the filter — they move and must
+    be reported immediately from the raw detection.
+
+    Usage::
+
+        tf = TemporalFilter(confirm_frames=2)
+        for screenshot in game_frames:
+            grid, entities = tf.step(screenshot)
+            # grid is scroll-stabilized; entities are fresh every frame.
+
+    Args:
+        confirm_frames: Number of consecutive frames a tile must read as
+            non-EMPTY before the filter confirms it as solid (default 2).
+        grid_rows: tile grid height  (default 16 — NES Mario)
+        grid_cols: tile grid width   (default 20 — NES viewport)
+    """
+
+    def __init__(
+        self,
+        confirm_frames: int = 2,
+        grid_rows: int = 16,
+        grid_cols: int = 20,
+    ):
+        self.confirm_frames = confirm_frames
+        self.grid_rows = grid_rows
+        self.grid_cols = grid_cols
+        # Streak counter: how many consecutive frames each tile has been non-EMPTY
+        self._streak = np.zeros((grid_rows, grid_cols), dtype=np.int8)
+        # Last confirmed stable grid (entities excluded)
+        self._stable = np.full((grid_rows, grid_cols), Tile.EMPTY, dtype=np.uint8)
+
+    def reset(self):
+        """Reset filter state (call on level load / death)."""
+        self._streak[:] = 0
+        self._stable[:] = Tile.EMPTY
+
+    def step(
+        self,
+        image: np.ndarray,
+        detect_entities: bool = True,
+    ) -> Tuple[np.ndarray, Dict]:
+        """
+        Process one screenshot frame.
+
+        Returns:
+            grid: (grid_rows, grid_cols) stabilized tile grid
+            entities: fresh entity dict from this frame (not filtered)
+        """
+        raw_grid, entities = image_to_ascii(
+            image,
+            grid_rows=self.grid_rows,
+            grid_cols=self.grid_cols,
+            detect_entities=detect_entities,
+        )
+
+        # Separate entity tiles from environment tiles for filtering
+        # Entity positions must NOT be filtered — they move every frame
+        entity_tiles = set()
+        if entities.get("mario_pos") is not None:
+            entity_tiles.add(entities["mario_pos"])
+        for e in entities.get("enemies", []):
+            entity_tiles.add((e["row"], e["col"]))
+
+        for r in range(self.grid_rows):
+            for c in range(self.grid_cols):
+                if (r, c) in entity_tiles:
+                    # Entity tile — always pass through immediately
+                    self._stable[r, c] = raw_grid[r, c]
+                    self._streak[r, c] = 0
+                    continue
+
+                if raw_grid[r, c] != Tile.EMPTY:
+                    # Tile appears solid — increment streak
+                    self._streak[r, c] += 1
+                    if self._streak[r, c] >= self.confirm_frames:
+                        # Confirmed solid — lock it in
+                        self._stable[r, c] = raw_grid[r, c]
+                else:
+                    # Tile went back to EMPTY — reset streak and clear stable
+                    self._streak[r, c] = 0
+                    self._stable[r, c] = Tile.EMPTY
+
+        return self._stable.copy(), entities

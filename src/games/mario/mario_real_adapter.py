@@ -6,14 +6,20 @@ trained on ASCII simulators can play the actual game. The conversion
 pipeline:
 
   Real NES frame (240x256 RGB pixels)
-    ↓  image_to_ascii()
-  Tile grid (14x16)
+    ↓  TemporalFilter (wraps image_to_ascii, 2-frame tile confirmation)
+  Stable tile grid (16x20)  ← pipes/bricks/gaps from pixels
+    ↓  RAM overlay
+  Mario & enemy positions injected from NES RAM (exact, no pixel noise)
     ↓  flatten + normalize
   Observation vector (same format as MarioAdapter)
     ↓
-  Agent picks action (0-5)
+  Agent picks action (0-7)
     ↓  ACTION_MAP
   NES joypad buttons → env.step()
+
+Hybrid strategy:
+  Tile layout  → TemporalFilter pixel decoder (robust, scroll-filtered)
+  Entity positions → NES RAM (exact pixel coords, animation-proof)
 
 Requirements (install on cloud):
   pip install gym-super-mario-bros nes-py
@@ -37,6 +43,17 @@ import numpy as np
 _gym_loaded = False
 _gym_mario = None
 _JoypadSpace = None
+
+# Lazy import for TemporalFilter (requires mario_simulator which is always available)
+_temporal_filter_cls = None
+
+def _ensure_temporal_filter():
+    """Lazy-load TemporalFilter to avoid circular import at module level."""
+    global _temporal_filter_cls
+    if _temporal_filter_cls is None:
+        from src.games.mario.screen_to_ascii import TemporalFilter
+        _temporal_filter_cls = TemporalFilter
+    return _temporal_filter_cls
 
 
 def _ensure_gym():
@@ -177,6 +194,17 @@ class MarioRealAdapter:
         self.obs_dim = 378
         self.n_actions = 8
 
+        # ── Hybrid pixel decoder ─────────────────────────────────────────────
+        # TemporalFilter decodes environment tile layout (pipes, bricks, pits,
+        # question blocks) from the raw pixel frame.  Mario and enemy positions
+        # are injected from RAM on top, so they are always exact.
+        TF = _ensure_temporal_filter()
+        self._tile_filter = TF(
+            confirm_frames=2,   # require 2 consecutive frames to confirm solid tile
+            grid_rows=16,
+            grid_cols=20,
+        )
+
     def _ram(self) -> Optional[np.ndarray]:
         """Get NES RAM array from environment."""
         env = self._env
@@ -190,6 +218,7 @@ class MarioRealAdapter:
         self._last_frame = frame
         self._step_count = 0
         self._last_obs_data = {}
+        self._tile_filter.reset()   # clear scroll-filter state on episode start
         return self._build_obs(info)
 
     def step(self, action: int) -> Tuple[np.ndarray, float, bool, dict]:
@@ -300,7 +329,11 @@ class MarioRealAdapter:
 
     def _build_obs(self, info: dict = None) -> np.ndarray:
         """
-        Build 378-dim observation from NES RAM state.
+        Build 378-dim observation from hybrid pixel + RAM state.
+
+        Tile layout (pipes, bricks, pits, question blocks) comes from the
+        TemporalFilter pixel decoder applied to the current frame.  Mario and
+        enemy positions are overlaid from RAM for exact, animation-proof coords.
 
         Layout matches MarioSimulator.get_obs() exactly:
           [0:320]   viewport grid 16×20 (normalized)
@@ -317,24 +350,31 @@ class MarioRealAdapter:
 
         obs = np.zeros(self.obs_dim, dtype=np.float32)
 
-        # ── [0:320] Viewport grid ──────────────────────────────────────
-        # Build a 16×20 grid. We fill ground at row 14 and sky elsewhere.
-        # If we have the info dict, use x_pos to infer tile layout later.
-        # For now: ground row and sky, with enemy positions marked.
-        grid = np.full((16, 20), Tile.EMPTY, dtype=np.uint8)
+        # ── [0:320] Viewport grid (hybrid) ────────────────────────────────────
+        # Step 1: decode tile layout from pixels via TemporalFilter
+        if self._last_frame is not None:
+            try:
+                # detect_entities=False: we get entities from RAM instead
+                pixel_grid, _ = self._tile_filter.step(
+                    self._last_frame, detect_entities=False
+                )
+            except Exception:
+                # If pixel decoding fails for any reason, fall back to blank grid
+                pixel_grid = np.full((16, 20), Tile.EMPTY, dtype=np.uint8)
+        else:
+            pixel_grid = np.full((16, 20), Tile.EMPTY, dtype=np.uint8)
 
-        # Ground (rows 13-15 are usually solid)
-        grid[13, :] = Tile.GROUND
-        grid[14, :] = Tile.GROUND
-        grid[15, :] = Tile.GROUND
+        # Step 2: overlay RAM-sourced entities on top of the pixel tile grid
+        grid = pixel_grid.copy()
 
-        # Mark enemies in the grid
+        # Mark enemies (exact RAM positions)
         for e in state["enemies"]:
             er, ec = e["y_tile"], e["x_tile"]
             if 0 <= er < 16 and 0 <= ec < 20:
+                # Use PIT as stand-in for enemy if Tile.ENEMY doesn't exist
                 grid[er, ec] = Tile.ENEMY if hasattr(Tile, "ENEMY") else Tile.PIT
 
-        # Mark Mario
+        # Mark Mario (exact RAM position, overrides any pixel-decoded tile)
         mr, mc = state["mario_y_tile"], state["mario_x_tile"]
         if 0 <= mr < 16 and 0 <= mc < 20:
             grid[mr, mc] = Tile.PLAYER
