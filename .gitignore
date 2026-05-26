@@ -8,8 +8,24 @@
 *.hdf5
 *.png
 
-# Throng5 archive (reference only, not needed for execution)
+# Vendored copies — do NOT commit; reference locally only
 throng5 - Copy/
+PufferLib-3.0 - Copy/
+disco_rl-main/
+
+# Run artefacts
+err.txt
+results/
+checkpoints/
+saves/
+*.txt.bak
+scaling_output.txt
+test_output.txt
+
+# Pytest / coverage
+.pytest_cache/
+.coverage
+htmlcov/
 
 # Python
 __pycache__/
