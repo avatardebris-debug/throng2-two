@@ -19,6 +19,7 @@ results/
 checkpoints/
 saves/
 *.txt.bak
+* - Copy.fm2
 scaling_output.txt
 test_output.txt
 

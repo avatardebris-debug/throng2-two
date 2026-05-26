@@ -15,8 +15,9 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 try:
     from src.learning.scaling_infrastructure import SparseWeightMatrix
-except:
-    SparseWeightMatrix = None  # Fallback for testing
+except ImportError:
+    # Optional dependency — tests may run without scaling_infrastructure
+    SparseWeightMatrix = None
 
 
 class PreventiveRedundancyManager:

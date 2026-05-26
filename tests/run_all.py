@@ -18,6 +18,10 @@ ROOT = Path(__file__).parent.parent
 
 PHASE_SCRIPTS: list[str] = [
     "tests/test_canonical_boundaries.py",
+    "tests/test_calibration.py",
+    "tests/test_consequence.py",
+    "tests/test_multires.py",
+    "tests/test_sparse.py",
     "tests/test_phase2.py",
     "tests/test_phase3.py",
     "tests/test_phase4.py",
