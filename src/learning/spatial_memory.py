@@ -31,7 +31,7 @@ class SpatialMemory:
         self.weights = []
         self.decay = decay
         
-        print(f"\nSpatial Memory initialized:")
+        print("\nSpatial Memory initialized:")
         print(f"  Decay rate: {decay}")
     
     def add(self, location, reward):
@@ -98,13 +98,13 @@ def test_spatial_memory():
     memory.add(np.array([48.0, 52.0]), reward=1.0)
     memory.add(np.array([51.0, 49.0]), reward=1.0)
     
-    print(f"\nTest 2: Recall")
+    print("\nTest 2: Recall")
     recalled = memory.recall()
     print(f"  Recalled location: {recalled}")
-    print(f"  Expected: ~[49.7, 50.3]")
+    print("  Expected: ~[49.7, 50.3]")
     print(f"  Confidence: {memory.confidence():.2f}")
     
-    print(f"\nTest 3: Decay")
+    print("\nTest 3: Decay")
     for i in range(5):
         memory.decay_memory()
         print(f"  After {i+1} decays: {len(memory.locations)} locations, confidence={memory.confidence():.2f}")

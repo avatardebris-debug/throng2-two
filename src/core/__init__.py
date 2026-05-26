@@ -1,1 +1,8 @@
-"""Empty init file for core package"""
+"""DEPRECATED package shim — see docs/CANONICAL_PATH.md."""
+import warnings
+
+warnings.warn(
+    "src.core is legacy; use the canonical path in docs/CANONICAL_PATH.md",
+    DeprecationWarning,
+    stacklevel=2,
+)
