@@ -25,59 +25,23 @@ Usage:
 """
 
 from __future__ import annotations
-import numpy as np
+
 from typing import Optional
 
+import numpy as np
 
-# ═══════════════════════════════════════════════════════════════
-# NUMPY MLP UTILITIES
-# ═══════════════════════════════════════════════════════════════
+from src.games.mario.backends.numpy_common import (
+    AdamParam,
+    init_weight,
+    relu,
+    relu_grad,
+    softmax,
+)
 
-def _init_weight(rows: int, cols: int) -> np.ndarray:
-    """Xavier uniform initialization."""
-    limit = np.sqrt(6.0 / (rows + cols))
-    return np.random.uniform(-limit, limit, (rows, cols)).astype(np.float32)
-
-
-def _softmax(x: np.ndarray) -> np.ndarray:
-    e = np.exp(x - x.max())
-    return e / (e.sum() + 1e-8)
-
-
-def _tanh(x: np.ndarray) -> np.ndarray:
-    return np.tanh(x)
-
-
-def _relu(x: np.ndarray) -> np.ndarray:
-    return np.maximum(0, x)
-
-
-def _relu_grad(x: np.ndarray) -> np.ndarray:
-    return (x > 0).astype(np.float32)
-
-
-# ═══════════════════════════════════════════════════════════════
-# ADAM OPTIMIZER (per-parameter)
-# ═══════════════════════════════════════════════════════════════
-
-class AdamParam:
-    """Adam optimizer state for a single parameter."""
-    __slots__ = ['m', 'v', 't']
-
-    def __init__(self, shape):
-        self.m = np.zeros(shape, dtype=np.float32)
-        self.v = np.zeros(shape, dtype=np.float32)
-        self.t = 0
-
-    def update(self, param: np.ndarray, grad: np.ndarray,
-               lr: float = 3e-4, beta1: float = 0.9,
-               beta2: float = 0.999, eps: float = 1e-8) -> np.ndarray:
-        self.t += 1
-        self.m = beta1 * self.m + (1 - beta1) * grad
-        self.v = beta2 * self.v + (1 - beta2) * grad ** 2
-        m_hat = self.m / (1 - beta1 ** self.t)
-        v_hat = self.v / (1 - beta2 ** self.t)
-        return param - lr * m_hat / (np.sqrt(v_hat) + eps)
+_init_weight = init_weight
+_relu = relu
+_relu_grad = relu_grad
+_softmax = softmax
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -261,17 +225,14 @@ class ICMModule:
 # PPO-ICM AGENT
 # ═══════════════════════════════════════════════════════════════
 
+from .backends.numpy_ppo import MarioRLAgent
+
+
 class MarioICMAgent:
     """
-    PPO + ICM agent for Mario ASCII. Pure numpy, no PyTorch.
+    PPO + ICM for Mario ASCII — composes MarioRLAgent + ICMModule.
 
-    Extends MarioRLAgent with intrinsic curiosity rewards.
-    Drop-in replacement: same step()/learn()/reset() interface.
-
-    The agent receives two reward signals:
-      r_total = r_extrinsic + intrinsic_lambda * r_curiosity
-
-    Where r_curiosity = forward model prediction error from ICM.
+    Use learn_with_next_obs() so curiosity can run; learn() is extrinsic-only PPO.
     """
 
     def __init__(
@@ -283,7 +244,6 @@ class MarioICMAgent:
         lr: float = 3e-4,
         gamma: float = 0.99,
         rollout_length: int = 128,
-        # ICM params
         icm_feature_dim: int = 32,
         icm_hidden_dim: int = 64,
         icm_lr: float = 1e-3,
@@ -291,27 +251,17 @@ class MarioICMAgent:
     ):
         self.obs_dim = obs_dim
         self.n_actions = n_actions
-        self.gamma = gamma
-        self.rollout_length = rollout_length
         self.intrinsic_lambda = intrinsic_lambda
 
-        # ── PPO policy network ────────────────────────────
-        self.w1 = _init_weight(obs_dim, hidden1)
-        self.b1 = np.zeros(hidden1, dtype=np.float32)
-        self.w2 = _init_weight(hidden1, hidden2)
-        self.b2 = np.zeros(hidden2, dtype=np.float32)
-        self.w_pi = _init_weight(hidden2, n_actions)
-        self.b_pi = np.zeros(n_actions, dtype=np.float32)
-        self.w_v = _init_weight(hidden2, 1)
-        self.b_v = np.zeros(1, dtype=np.float32)
-
-        # Adam for policy
-        self._adam_policy = {}
-        for name in ['w1', 'b1', 'w2', 'b2', 'w_pi', 'b_pi', 'w_v', 'b_v']:
-            self._adam_policy[name] = AdamParam(getattr(self, name).shape)
-        self._lr = lr
-
-        # ── ICM module ────────────────────────────────────
+        self.ppo = MarioRLAgent(
+            obs_dim=obs_dim,
+            n_actions=n_actions,
+            hidden1=hidden1,
+            hidden2=hidden2,
+            lr=lr,
+            gamma=gamma,
+            rollout_length=rollout_length,
+        )
         self.icm = ICMModule(
             obs_dim=obs_dim,
             n_actions=n_actions,
@@ -320,227 +270,47 @@ class MarioICMAgent:
             lr=icm_lr,
         )
 
-        # ── Rollout buffer ────────────────────────────────
-        self._obs_buf = []
-        self._act_buf = []
-        self._rew_buf = []      # extrinsic
-        self._int_rew_buf = []  # intrinsic
-        self._logp_buf = []
-        self._val_buf = []
-        self._done_buf = []
-        self._next_obs_buf = []
-
-        self._last_obs = None
-        self._last_act = None
-        self._last_logp = None
-        self._last_val = None
-        self._step_count = 0
-
-        # Stats
+        self._last_raw_obs: Optional[np.ndarray] = None
         self.total_intrinsic_reward = 0.0
         self.total_extrinsic_reward = 0.0
-
-    def _forward(self, obs: np.ndarray):
-        """Forward pass through policy network."""
-        h1 = _tanh(obs @ self.w1 + self.b1)
-        h2 = _tanh(h1 @ self.w2 + self.b2)
-        logits = h2 @ self.w_pi + self.b_pi
-        value = (h2 @ self.w_v + self.b_v)[0]
-        return logits, value, h1, h2
 
     def step(self, obs: np.ndarray) -> int:
-        """Choose action given observation."""
-        logits, value, _, _ = self._forward(obs)
-        probs = _softmax(logits)
-        action = np.random.choice(self.n_actions, p=probs)
-        log_prob = np.log(probs[action] + 1e-8)
-
-        self._last_obs = obs
-        self._last_act = action
-        self._last_logp = log_prob
-        self._last_val = value
-
-        return action
+        self._last_raw_obs = np.asarray(obs, dtype=np.float32)
+        return self.ppo.step(obs)
 
     def learn(self, reward: float, done: bool):
-        """Store transition and potentially do PPO update."""
-        if self._last_obs is None:
-            return
-
-        self._obs_buf.append(self._last_obs)
-        self._act_buf.append(self._last_act)
-        self._rew_buf.append(reward)
-        self._logp_buf.append(self._last_logp)
-        self._val_buf.append(self._last_val)
-        self._done_buf.append(done)
-        self._step_count += 1
-
+        """Extrinsic reward only (no ICM without next_obs)."""
+        if self.ppo._last_obs is None:
+            return None
         self.total_extrinsic_reward += reward
-
-        if len(self._obs_buf) >= self.rollout_length or done:
-            self._ppo_update()
-            self._obs_buf.clear()
-            self._act_buf.clear()
-            self._rew_buf.clear()
-            self._int_rew_buf.clear()
-            self._logp_buf.clear()
-            self._val_buf.clear()
-            self._done_buf.clear()
-            self._next_obs_buf.clear()
+        return self.ppo.learn(reward, done)
 
     def learn_with_next_obs(self, reward: float, done: bool, next_obs: np.ndarray):
-        """
-        Learn with ICM: stores transition with next_obs for curiosity computation.
-        Call this instead of learn() when you have the next observation.
-        """
-        if self._last_obs is None:
-            return
+        """PPO update with r_total = r_ext + λ * r_intrinsic."""
+        if self.ppo._last_obs is None or self._last_raw_obs is None:
+            return None
 
-        # Compute intrinsic reward
+        next_obs = np.asarray(next_obs, dtype=np.float32)
         intrinsic_r = self.icm.compute_intrinsic_reward(
-            self._last_obs, self._last_act, next_obs
+            self._last_raw_obs, int(self.ppo._last_action), next_obs
         )
         self.total_intrinsic_reward += intrinsic_r
-
-        self._obs_buf.append(self._last_obs)
-        self._act_buf.append(self._last_act)
-        # Combined reward
-        combined_reward = reward + self.intrinsic_lambda * intrinsic_r
-        self._rew_buf.append(combined_reward)
-        self._int_rew_buf.append(intrinsic_r)
-        self._logp_buf.append(self._last_logp)
-        self._val_buf.append(self._last_val)
-        self._done_buf.append(done)
-        self._next_obs_buf.append(next_obs)
-        self._step_count += 1
-
         self.total_extrinsic_reward += reward
-
-        if len(self._obs_buf) >= self.rollout_length or done:
-            self._ppo_update()
-            self._obs_buf.clear()
-            self._act_buf.clear()
-            self._rew_buf.clear()
-            self._int_rew_buf.clear()
-            self._logp_buf.clear()
-            self._val_buf.clear()
-            self._done_buf.clear()
-            self._next_obs_buf.clear()
+        combined = reward + self.intrinsic_lambda * intrinsic_r
+        return self.ppo.learn(combined, done)
 
     def reset(self):
-        """Reset episode state."""
-        self._last_obs = None
-        self._last_act = None
-        self._last_logp = None
-        self._last_val = None
+        self.ppo.reset()
+        self._last_raw_obs = None
         self.total_intrinsic_reward = 0.0
         self.total_extrinsic_reward = 0.0
 
-    def _ppo_update(self):
-        """PPO update with GAE."""
-        n = len(self._obs_buf)
-        if n < 2:
-            return
+    @property
+    def neuron_count(self):
+        return 0
 
-        obs = np.array(self._obs_buf)
-        acts = np.array(self._act_buf)
-        rews = np.array(self._rew_buf)
-        old_logps = np.array(self._logp_buf)
-        vals = np.array(self._val_buf)
-        dones = np.array(self._done_buf)
-
-        # Bootstrap value
-        if dones[-1]:
-            next_val = 0.0
-        else:
-            _, next_val, _, _ = self._forward(obs[-1])
-
-        # GAE
-        advantages = np.zeros(n, dtype=np.float32)
-        gae = 0.0
-        lam = 0.95
-        for t in reversed(range(n)):
-            if t == n - 1:
-                next_v = next_val
-            else:
-                next_v = vals[t + 1]
-            mask = 1.0 - float(dones[t])
-            delta = rews[t] + self.gamma * next_v * mask - vals[t]
-            gae = delta + self.gamma * lam * mask * gae
-            advantages[t] = gae
-
-        returns = advantages + vals
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-
-        # PPO epochs
-        clip_eps = 0.2
-        for _ in range(4):
-            indices = np.random.permutation(n)
-            for start in range(0, n, 32):
-                end = min(start + 32, n)
-                idx = indices[start:end]
-                mb_obs = obs[idx]
-                mb_acts = acts[idx]
-                mb_old_logps = old_logps[idx]
-                mb_returns = returns[idx]
-                mb_advs = advantages[idx]
-
-                # Forward
-                for i in range(len(idx)):
-                    logits, value, h1, h2 = self._forward(mb_obs[i])
-                    probs = _softmax(logits)
-                    a = mb_acts[i]
-                    log_prob = np.log(probs[a] + 1e-8)
-
-                    # Ratio
-                    ratio = np.exp(log_prob - mb_old_logps[i])
-                    adv = mb_advs[i]
-
-                    # Clipped surrogate
-                    surr1 = ratio * adv
-                    surr2 = np.clip(ratio, 1 - clip_eps, 1 + clip_eps) * adv
-                    policy_loss = -min(surr1, surr2)
-
-                    # Value loss
-                    value_loss = 0.5 * (value - mb_returns[i]) ** 2
-
-                    # Entropy bonus
-                    entropy = -np.sum(probs * np.log(probs + 1e-8))
-                    entropy_loss = -0.01 * entropy
-
-                    # Total loss gradient (simplified single-sample)
-                    # Policy gradient
-                    d_logits = probs.copy()
-                    d_logits[a] -= 1.0
-                    scale = -adv * min(1.0, max(-1.0, ratio))
-                    d_logits *= scale
-
-                    # Value gradient
-                    d_value = value - mb_returns[i]
-
-                    # Backprop through network
-                    d_w_pi = np.outer(h2, d_logits)
-                    d_b_pi = d_logits
-                    d_w_v = h2.reshape(-1, 1) * d_value
-                    d_b_v = np.array([d_value], dtype=np.float32)
-
-                    d_h2 = d_logits @ self.w_pi.T + d_value * self.w_v.squeeze()
-                    d_h2 *= (1 - h2 ** 2)  # tanh grad
-                    d_w2 = np.outer(h1, d_h2)
-                    d_b2 = d_h2
-
-                    d_h1 = d_h2 @ self.w2.T
-                    d_h1 *= (1 - h1 ** 2)
-                    d_w1 = np.outer(mb_obs[i], d_h1)
-                    d_b1 = d_h1
-
-                    # Update
-                    lr = self._lr
-                    self.w_pi = self._adam_policy['w_pi'].update(self.w_pi, d_w_pi, lr)
-                    self.b_pi = self._adam_policy['b_pi'].update(self.b_pi, d_b_pi, lr)
-                    self.w_v = self._adam_policy['w_v'].update(self.w_v, d_w_v, lr)
-                    self.b_v = self._adam_policy['b_v'].update(self.b_v, d_b_v, lr)
-                    self.w2 = self._adam_policy['w2'].update(self.w2, d_w2, lr)
-                    self.b2 = self._adam_policy['b2'].update(self.b2, d_b2, lr)
-                    self.w1 = self._adam_policy['w1'].update(self.w1, d_w1, lr)
-                    self.b1 = self._adam_policy['b1'].update(self.b1, d_b1, lr)
+    def stats(self) -> dict:
+        out = self.ppo.stats()
+        out["total_intrinsic_reward"] = round(self.total_intrinsic_reward, 4)
+        out["total_extrinsic_reward"] = round(self.total_extrinsic_reward, 4)
+        return out

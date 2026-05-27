@@ -274,14 +274,20 @@ class ZoneCurriculum:
     def _promote(self):
         """Advance to the next zone."""
         if self.current_zone_idx < len(self.zones) - 1:
-            old = self.current_zone_idx
             self.current_zone_idx += 1
             self._promotions.append((self._total_episodes, self.current_zone_idx))
             # Generate a new level periodically to prevent overfitting
             if len(self._promotions) % 3 == 0:
                 self._new_level()
                 self.zones = make_zones(self._current_level.width)
-                self._zone_checkpoints.clear()  # New level = new checkpoints needed
+                self._zone_checkpoints.clear()
+                # Rebuild zone results deques for new zone definitions
+                # Keep existing data where zone IDs overlap
+                old_results = self._zone_results
+                self._zone_results = {
+                    z.id: deque(old_results.get(z.id, deque()), maxlen=z.eval_window)
+                    for z in self.zones
+                }
 
     def _demote(self):
         """Drop back one zone."""

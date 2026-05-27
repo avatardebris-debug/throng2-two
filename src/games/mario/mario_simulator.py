@@ -146,15 +146,21 @@ class MarioSimulator:
     GRID_H = 16  # rows (top = 0 = sky, bottom = 15 = ground level)
     GROUND_ROW = 13  # Default ground level (rows 13-15 are ground)
 
-    # Rewards
-    R_STEP = -0.01
-    R_COIN = 0.5
-    R_BRICK_BREAK = 0.1
-    R_QUESTION_HIT = 0.3
-    R_ENEMY_STOMP = 1.0
-    R_PROGRESS = 0.1      # Per new rightmost position reached
-    R_WIN = 10.0
-    R_DEATH = -1.0         # Was -5.0 — reduced so agent doesn't prefer standing still
+    # ── Reward shaping ─────────────────────────────────────────
+    # Following Mario RL best practices (OpenAI, Go-Explore, MarioAI)
+    R_STEP       = -0.01     # Small cost of living
+    R_COIN       = 0.5       # Coin pickup
+    R_BRICK_BREAK = 0.1      # Breaking bricks
+    R_QUESTION_HIT = 0.3     # Hitting ? block
+    R_ENEMY_STOMP = 1.0      # Stomping enemy
+    R_PROGRESS   = 0.1       # Per NEW rightmost column reached
+    R_VELOCITY   = 0.05      # Per rightward tile moved (even if not new max)
+    R_LEFTWARD   = -0.05     # Penalty for moving left (discourages backtracking)
+    R_STALL      = -0.10     # Penalty when standing still too long
+    R_WIN        = 10.0      # Level clear base reward
+    R_DEATH      = -1.0      # Death penalty (moderate — don't prefer paralysis)
+    STALL_THRESHOLD = 5      # Steps without rightward progress before stall penalty
+    TIME_PRESSURE_RATE = 0.005  # Accelerating time cost: -rate * (step/200)
 
     def __init__(
         self,
@@ -196,6 +202,8 @@ class MarioSimulator:
         self.score = 0
         self.step_count = 0
         self.max_x_reached = self.mario_col  # Rightmost position ever reached
+        self._stall_count = 0                # Steps since last rightward progress
+        self._prev_col = self.mario_col       # For velocity reward
 
         # Viewport (for multi-screen scrolling)
         self.scroll_x = 0
@@ -234,8 +242,11 @@ class MarioSimulator:
 
         self.step_count += 1
         reward = self.R_STEP
+        # Accelerating time pressure: gets worse the longer you take
+        reward -= self.TIME_PRESSURE_RATE * (self.step_count / 200.0)
         info: Dict[str, Any] = {}
         action = Action(action)
+        col_before = self.mario_col
 
         # ── 1. Compute desired movement ────────────────────────────
         dx = 0
@@ -385,8 +396,32 @@ class MarioSimulator:
                 reward += self.R_ENEMY_STOMP * enemy_info["stomps"]
                 info["stomps"] = enemy_info["stomps"]
 
-        # ── 8. Update scroll ─────────────────────────────────────
-        # Camera follows Mario, centered when possible
+        # ── 8. Velocity + Stall rewards ────────────────────────
+        if self.alive:
+            dx_actual = self.mario_col - col_before
+            if dx_actual > 0:
+                reward += self.R_VELOCITY * dx_actual
+                self._stall_count = 0
+            elif dx_actual < 0:
+                reward += self.R_LEFTWARD * abs(dx_actual)
+                self._stall_count += 1
+            else:
+                self._stall_count += 1
+
+            if self._stall_count >= self.STALL_THRESHOLD:
+                reward += self.R_STALL
+                info["stalled"] = self._stall_count
+
+            self._prev_col = self.mario_col
+
+        # ── 9. Speed bonus on clear ──────────────────────────────
+        if self.won:
+            max_steps = self.width * 4  # generous time budget
+            speed_bonus = max(0.0, 1.0 - self.step_count / max(max_steps, 1))
+            reward += self.R_WIN * speed_bonus * 0.5  # up to +5.0 extra
+            info["speed_bonus"] = round(speed_bonus, 3)
+
+        # ── 10. Update scroll ────────────────────────────────────
         self.scroll_x = max(0, min(self.mario_col - 10,
                                     self.width - 20))
 

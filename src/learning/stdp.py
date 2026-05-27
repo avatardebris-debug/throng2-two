@@ -43,7 +43,7 @@ class STDPLearning:
         # Eligibility traces (which synapses are eligible for updates)
         self.eligibility = {}
         
-        print(f"\nSTDP Learning initialized:")
+        print("\nSTDP Learning initialized:")
         print(f"  LTP window: {tau_plus*1000:.1f}ms")
         print(f"  LTD window: {tau_minus*1000:.1f}ms")
         print(f"  LTP rate: {A_plus}")

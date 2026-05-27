@@ -36,7 +36,7 @@ class DopamineSystem:
         self.rpe_history = []
         self.reward_history = []
         
-        print(f"\nDopamine System initialized:")
+        print("\nDopamine System initialized:")
         print(f"  Baseline: {baseline}")
         print(f"  Learning rate: {learning_rate}")
     
@@ -107,8 +107,8 @@ class ReinforcementLearning:
         self.stdp = stdp
         self.dopamine = dopamine
         
-        print(f"\nReinforcement Learning initialized:")
-        print(f"  Three-factor rule: STDP × Dopamine × Eligibility")
+        print("\nReinforcement Learning initialized:")
+        print("  Three-factor rule: STDP × Dopamine × Eligibility")
     
     def update_weights(self, weights, reward):
         """
@@ -159,7 +159,7 @@ def test_dopamine():
     
     print("\nTest 1: Unexpected reward (positive RPE)")
     rpe = dopamine.compute_rpe(1.0)
-    print(f"  Reward: 1.0, Expected: 0.0")
+    print("  Reward: 1.0, Expected: 0.0")
     print(f"  RPE: {rpe:+.3f} (should be positive)")
     print(f"  Dopamine level: {dopamine.level:.3f}")
     
